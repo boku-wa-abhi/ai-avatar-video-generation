@@ -301,3 +301,132 @@ def test_tts_to_video_roundtrip():
     assert Path(final).exists()
     info = va.get_video_info(final)
     assert info["width"] == 1080
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. MuseTalk end-to-end: TTS → lip-sync → valid output video
+# ─────────────────────────────────────────────────────────────────────────────
+
+MUSETALK_DIR = Path("/Users/abhijeetanand/MuseTalk")
+MUSETALK_ENV_PY = MUSETALK_DIR / "musetalk-env" / "bin" / "python"
+MUSETALK_HF_CLI = MUSETALK_DIR / "musetalk-env" / "bin" / "huggingface-cli"
+MUSETALK_GDOWN = MUSETALK_DIR / "musetalk-env" / "bin" / "gdown"
+MODELS_DIR = MUSETALK_DIR / "models"
+
+
+def _hf_download(repo_id: str, local_dir: Path, include: list[str]) -> None:
+    """Download files from a HuggingFace repo into local_dir if not already present."""
+    missing = [f for f in include if not (local_dir / f).exists()]
+    if not missing:
+        return
+    local_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            str(MUSETALK_HF_CLI), "download", repo_id,
+            "--local-dir", str(local_dir),
+            "--include", *include,
+        ],
+        check=True,
+        timeout=600,
+    )
+
+
+def _ensure_musetalk_weights() -> None:
+    """Download all MuseTalk model weights if not already present."""
+    # MuseTalk V1 + V1.5 UNet
+    _hf_download(
+        "TMElyralab/MuseTalk",
+        MODELS_DIR,
+        ["musetalk/musetalk.json", "musetalk/pytorch_model.bin",
+         "musetalkV15/musetalk.json", "musetalkV15/unet.pth"],
+    )
+    # Whisper-tiny
+    _hf_download(
+        "openai/whisper-tiny",
+        MODELS_DIR / "whisper",
+        ["config.json", "pytorch_model.bin", "preprocessor_config.json"],
+    )
+    # SD-VAE
+    _hf_download(
+        "stabilityai/sd-vae-ft-mse",
+        MODELS_DIR / "sd-vae",
+        ["config.json", "diffusion_pytorch_model.bin"],
+    )
+    # DWPose
+    _hf_download(
+        "yzd-v/DWPose",
+        MODELS_DIR / "dwpose",
+        ["dw-ll_ucoco_384.pth"],
+    )
+    # Face-parse-bisent: resnet18 backbone
+    resnet_dst = MODELS_DIR / "face-parse-bisent" / "resnet18-5c106cde.pth"
+    if not resnet_dst.exists():
+        resnet_dst.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["curl", "-fL",
+             "https://download.pytorch.org/models/resnet18-5c106cde.pth",
+             "-o", str(resnet_dst)],
+            check=True,
+            timeout=300,
+        )
+    # Face-parse-bisent: segmentation model
+    bisent_dst = MODELS_DIR / "face-parse-bisent" / "79999_iter.pth"
+    if not bisent_dst.exists():
+        bisent_dst.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [str(MUSETALK_GDOWN),
+             "https://drive.google.com/uc?id=154JgKpzCPW82qINcVieuPH3fZ2e0P812",
+             "-O", str(bisent_dst)],
+            check=True,
+            timeout=300,
+        )
+
+
+def _check_video_valid(path: str) -> dict:
+    """Return ffprobe info dict; raises AssertionError if video is invalid."""
+    r = subprocess.run(
+        ["ffprobe", "-v", "error",
+         "-select_streams", "v:0",
+         "-show_entries", "stream=width,height,nb_frames",
+         "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=0",
+         path],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, f"ffprobe failed on {path}: {r.stderr}"
+    assert Path(path).stat().st_size > 10_000, "Output video is suspiciously small"
+    return r.stdout
+
+
+@pytest.mark.slow
+def test_musetalk_e2e():
+    """End-to-end: TTS → MuseTalk lip-sync → valid MP4."""
+    if not MUSETALK_DIR.exists():
+        pytest.skip("MuseTalk not installed at /Users/abhijeetanand/MuseTalk")
+    if not AVATAR_PNG.exists():
+        pytest.skip(f"No avatar image at {AVATAR_PNG}")
+
+    # 1. Ensure all model weights are present (downloads if needed)
+    _ensure_musetalk_weights()
+
+    # 2. Generate short TTS audio
+    from avatarpipeline.voice.kokoro import VoiceGenerator
+    vg = VoiceGenerator()
+    wav_path = str(TEST_OUT / "musetalk_e2e_tts.wav")
+    wav_16k = str(TEST_OUT / "musetalk_e2e_tts_16k.wav")
+    vg.generate("Hello, this is an end-to-end MuseTalk test.", voice="af_heart", out_path=wav_path)
+    vg.convert_to_16k(wav_path, wav_16k)
+    assert Path(wav_16k).exists(), "16k WAV not created"
+
+    # 3. Run MuseTalk inference
+    from avatarpipeline.lipsync.musetalk import MuseTalkInference
+    ms = MuseTalkInference()
+    out_dir = str(TEST_OUT / "musetalk_e2e_out")
+    output_video = ms.run(str(AVATAR_PNG), wav_16k, output_dir=out_dir)
+
+    # 4. Validate output
+    assert Path(output_video).exists(), f"Output video not found: {output_video}"
+    probe = _check_video_valid(output_video)
+    assert "width" in probe or "height" in probe or "duration" in probe, (
+        f"ffprobe output unexpected: {probe}"
+    )

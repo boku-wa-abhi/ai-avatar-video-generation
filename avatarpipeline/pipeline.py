@@ -66,7 +66,8 @@ def run_pipeline(
     Returns:
         Absolute path to the final MP4.
     """
-    from avatarpipeline.lipsync.latentsync import LatentSyncInference
+    # NOTE: LatentSync requires CUDA — commented out for MPS/CPU systems.
+    # from avatarpipeline.lipsync.latentsync import LatentSyncInference
     from avatarpipeline.lipsync.musetalk import MuseTalkInference
     from avatarpipeline.postprocess.assembler import VideoAssembler
     from avatarpipeline.postprocess.captions import CaptionGenerator
@@ -111,17 +112,21 @@ def run_pipeline(
     logger.info(f"   Resample done in {_elapsed(t)}")
 
     # ── Step 3: Lip-sync ────────────────────────────────────────────────────
-    if use_musetalk:
-        _step(3, TOTAL, "Lip-sync — MuseTalk 1.5")
-        t = time.time()
-        ms = MuseTalkInference()
-        ms.prepare_avatar(str(avatar_png))
-        lipsync_mp4 = ms.run(str(avatar_png), speech_16k)
-    else:
-        _step(3, TOTAL, "Lip-sync — LatentSync 1.6")
-        t = time.time()
-        ls = LatentSyncInference()
-        lipsync_mp4 = ls.run(str(avatar_png), speech_16k, output_path=lipsync_mp4)
+    # NOTE: LatentSync 1.6 requires CUDA GPU. Uncomment the else branch below
+    # if running on a CUDA system for higher-quality lip-sync.
+    #
+    # if not use_musetalk:
+    #     _step(3, TOTAL, "Lip-sync — LatentSync 1.6")
+    #     t = time.time()
+    #     from avatarpipeline.lipsync.latentsync import LatentSyncInference
+    #     ls = LatentSyncInference()
+    #     lipsync_mp4 = ls.run(str(avatar_png), speech_16k, output_path=lipsync_mp4)
+    # else:
+    _step(3, TOTAL, "Lip-sync — MuseTalk 1.5")
+    t = time.time()
+    ms = MuseTalkInference()
+    ms.prepare_avatar(str(avatar_png))
+    lipsync_mp4 = ms.run(str(avatar_png), speech_16k)
 
     logger.info(f"   Lip-sync done in {_elapsed(t)}")
 

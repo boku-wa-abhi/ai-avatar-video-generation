@@ -345,7 +345,9 @@ def generate_video(
             return
 
         step = 3
-        engine = "LatentSync 1.6" if use_latentsync else "MuseTalk 1.5"
+        # NOTE: LatentSync 1.6 requires CUDA GPU. Using MuseTalk for MPS/CPU.
+        # To re-enable LatentSync on a CUDA system, uncomment the if/else block below.
+        engine = "MuseTalk 1.5"
         log(f"STEP {step}/{TOTAL}: Running {engine} lip-sync...")
         progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Lip-sync ({engine})")
         yield None, current_log(), "", get_video_history()
@@ -353,15 +355,15 @@ def generate_video(
         t0 = time.time()
         lipsync_mp4 = str(OUTPUT_DIR / f"lipsync_{run_id}.mp4")
 
-        if use_latentsync:
-            from avatarpipeline.lipsync.latentsync import LatentSyncInference
-            ls = LatentSyncInference()
-            lipsync_mp4 = ls.run(str(avatar_png), speech_16k, output_path=lipsync_mp4)
-        else:
-            from avatarpipeline.lipsync.musetalk import MuseTalkInference
-            ms = MuseTalkInference()
-            ms.prepare_avatar(str(avatar_png))
-            lipsync_mp4 = ms.run(str(avatar_png), speech_16k)
+        # if use_latentsync:  # CUDA only
+        #     from avatarpipeline.lipsync.latentsync import LatentSyncInference
+        #     ls = LatentSyncInference()
+        #     lipsync_mp4 = ls.run(str(avatar_png), speech_16k, output_path=lipsync_mp4)
+        # else:
+        from avatarpipeline.lipsync.musetalk import MuseTalkInference
+        ms = MuseTalkInference()
+        ms.prepare_avatar(str(avatar_png))
+        lipsync_mp4 = ms.run(str(avatar_png), speech_16k)
 
         em, es = divmod(int(time.time() - t0), 60)
         log(f"STEP {step}/{TOTAL}: ✅ Lip-sync complete ({em}m {es}s)")
@@ -706,7 +708,8 @@ with gr.Blocks(title="Avatar Studio") as demo:
             with gr.Accordion("Advanced Options", open=False):
                 with gr.Row():
                     use_latentsync_cb = gr.Checkbox(
-                        label="LatentSync 1.6 (higher quality, slower)", value=True
+                        label="LatentSync 1.6 (CUDA only — ignored on MPS)", value=False,
+                        interactive=False,
                     )
                     enhance_face_cb = gr.Checkbox(
                         label="CodeFormer face enhancement", value=True

@@ -8,6 +8,7 @@ for the MuseTalk lip-sync model on Apple M4 Pro (MPS backend).
 import glob
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -63,6 +64,8 @@ class MuseTalkInference:
             FileNotFoundError: If no MP4 files are found.
         """
         mp4_files = glob.glob(os.path.join(output_dir, "**", "*.mp4"), recursive=True)
+        # Filter out temp_ files — MuseTalk creates temp_<name>.mp4 intermediates
+        mp4_files = [f for f in mp4_files if not os.path.basename(f).startswith("temp_")]
         if not mp4_files:
             raise FileNotFoundError(
                 f"No MP4 files found in {output_dir}. "
@@ -136,39 +139,58 @@ class MuseTalkInference:
         logger.info(f"  Audio:  {audio_wav}")
         logger.info(f"  Output: {out_dir}")
 
-        cmd = [
-            str(self.venv_python),
-            "-m", "scripts.inference",
-            "--version", "v15",
-            "--video_path", str(avatar_png),
-            "--audio_path", str(audio_wav),
-            "--output_dir", str(out_dir),
-            "--fps", str(self.default_fps),
-            "--use_float16",
-        ]
-
-        env = os.environ.copy()
-        env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-        env["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+        # Write a temporary inference config YAML (MuseTalk reads paths from a
+        # YAML task config rather than accepting them as direct CLI arguments).
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False, dir=str(self.musetalk_dir)
+        ) as cfg_f:
+            cfg_f.write(
+                f"task_0:\n"
+                f"  video_path: \"{avatar_png}\"\n"
+                f"  audio_path: \"{audio_wav}\"\n"
+            )
+            tmp_cfg_path = cfg_f.name
 
         try:
-            result = subprocess.run(
-                cmd,
-                cwd=str(self.musetalk_dir),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("MuseTalk inference timed out after 600 seconds.")
+            cmd = [
+                str(self.venv_python),
+                "-m", "scripts.inference",
+                "--version", "v15",
+                "--inference_config", tmp_cfg_path,
+                "--result_dir", str(out_dir),
+                "--fps", str(self.default_fps),
+                "--unet_model_path", "models/musetalkV15/unet.pth",
+                "--unet_config", "models/musetalkV15/musetalk.json",
+                "--whisper_dir", "models/whisper",
+            ]
 
-        if result.returncode != 0:
-            logger.error(f"MuseTalk STDOUT:\n{result.stdout}")
-            logger.error(f"MuseTalk STDERR:\n{result.stderr}")
-            raise RuntimeError(
-                f"MuseTalk inference failed (exit code {result.returncode})."
-            )
+            env = os.environ.copy()
+            env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+            env["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=str(self.musetalk_dir),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("MuseTalk inference timed out after 600 seconds.")
+
+            if result.returncode != 0:
+                logger.error(f"MuseTalk STDOUT:\n{result.stdout}")
+                logger.error(f"MuseTalk STDERR:\n{result.stderr}")
+                raise RuntimeError(
+                    f"MuseTalk inference failed (exit code {result.returncode})."
+                )
+        finally:
+            try:
+                os.unlink(tmp_cfg_path)
+            except OSError:
+                pass
 
         logger.info("MuseTalk inference completed.")
         return self._find_output_video(str(out_dir))
