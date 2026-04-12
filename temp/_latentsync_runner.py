@@ -20,8 +20,8 @@ pipe = pipe.to(device)
 # Run inference
 output = pipe(
     video_path='/Users/abhijeetanand/Projects/Personal/02_Github_Projects/ai-avatar-video-generation/temp/avatar_loop.mp4',
-    audio_path='/Users/abhijeetanand/Projects/Personal/02_Github_Projects/ai-avatar-video-generation/audio/speech_20260412_142749_16k.wav',
-    video_out_path='/Users/abhijeetanand/Projects/Personal/02_Github_Projects/ai-avatar-video-generation/output/lipsync_20260412_142749.mp4',
+    audio_path='/Users/abhijeetanand/Projects/Personal/02_Github_Projects/ai-avatar-video-generation/audio/speech_20260412_142903_16k.wav',
+    video_out_path='/Users/abhijeetanand/Projects/Personal/02_Github_Projects/ai-avatar-video-generation/output/lipsync_20260412_142903.mp4',
     num_inference_steps=25,
     guidance_scale=1.5,
 )
