@@ -1,0 +1,16 @@
+# Avatar Pipeline — Python dependencies
+# Install with: uv pip install -r requirements.txt
+# Requires Python 3.10, run inside ~/MuseTalk/musetalk-env
+
+elevenlabs>=1.0.0
+faster-whisper>=1.0.0
+pyyaml
+pillow
+requests
+tqdm
+loguru
+numpy
+soundfile
+diffusers>=0.25.0
+transformers>=4.36.0
+accelerate
