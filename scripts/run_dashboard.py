@@ -59,6 +59,7 @@ def main() -> None:
         theme=gr.themes.Soft(),
         css=CSS,
         favicon_path=str(ASSETS_DIR / "favicon.png"),
+        allowed_paths=[str(ROOT)],
     )
 
 

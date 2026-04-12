@@ -98,6 +98,7 @@ def save_uploaded_avatar(file_path: str) -> tuple[str | None, str, list]:
         return None, "No file selected.", get_avatar_gallery()
 
     try:
+        AVATARS_DIR.mkdir(parents=True, exist_ok=True)
         img = Image.open(file_path).convert("RGB")
         target = 512
         ratio = min(target / img.width, target / img.height)
@@ -244,6 +245,12 @@ def generate_video(
     preview_mode: bool,
     caption_font_size: int,
     caption_position: str,
+    mt_batch_size: int = 8,
+    mt_bbox_shift: int = 0,
+    st_expression_scale: float = 1.0,
+    st_pose_style: int = 0,
+    st_still: bool = True,
+    st_preprocess: str = "full",
     progress=gr.Progress(track_tqdm=False),
 ):
     """Run the full 7-step pipeline, streaming progress updates to the UI."""
@@ -361,12 +368,23 @@ def generate_video(
         if engine_key in ("sadtalker", "sadtalker_hd"):
             from avatarpipeline.lipsync.sadtalker import SadTalkerInference
             st = SadTalkerInference(preset=engine_key)
-            lipsync_mp4 = st.run(str(avatar_png), speech_16k, output_path=lipsync_mp4)
+            lipsync_mp4 = st.run(
+                str(avatar_png), speech_16k,
+                output_path=lipsync_mp4,
+                expression_scale=st_expression_scale,
+                pose_style=st_pose_style,
+                still=st_still,
+                preprocess=st_preprocess,
+            )
         else:
             from avatarpipeline.lipsync.musetalk import MuseTalkInference
             ms = MuseTalkInference()
             ms.prepare_avatar(str(avatar_png))
-            lipsync_mp4 = ms.run(str(avatar_png), speech_16k)
+            lipsync_mp4 = ms.run(
+                str(avatar_png), speech_16k,
+                batch_size=mt_batch_size,
+                bbox_shift=mt_bbox_shift,
+            )
 
         em, es = divmod(int(time.time() - t0), 60)
         log(f"STEP {step}/{TOTAL}: ✅ Lip-sync complete ({em}m {es}s)")
@@ -487,6 +505,12 @@ def generate_video(
 def cancel_generation():
     _cancel_event.set()
     return f"[{_ts()}] ⏹ Cancel requested — stopping after current step..."
+
+
+def _toggle_lipsync_params(engine: str):
+    """Show MuseTalk params for MuseTalk, SadTalker params for SadTalker variants."""
+    is_musetalk = "MuseTalk" in engine
+    return gr.update(visible=is_musetalk), gr.update(visible=not is_musetalk)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -718,6 +742,55 @@ with gr.Blocks(title="Avatar Studio") as demo:
                     ],
                     value="MuseTalk 1.5 (default)",
                 )
+
+                # ── MuseTalk hyperparameters ──────────────────────────────
+                with gr.Column(visible=True) as musetalk_params:
+                    gr.Markdown(
+                        "<span style='font-size:0.72rem;color:#64748b;font-weight:600;"
+                        "text-transform:uppercase;letter-spacing:0.08em'>"
+                        "MuseTalk Settings</span>"
+                    )
+                    with gr.Row():
+                        mt_batch_size = gr.Slider(
+                            label="Batch Size",
+                            minimum=1, maximum=16, step=1, value=8,
+                            info="Larger batch = faster inference, uses more memory",
+                        )
+                        mt_bbox_shift = gr.Slider(
+                            label="Lip Region Shift",
+                            minimum=-10, maximum=10, step=1, value=0,
+                            info="Shift lip crop region up (−) or down (+)",
+                        )
+
+                # ── SadTalker hyperparameters ─────────────────────────────
+                with gr.Column(visible=False) as sadtalker_params:
+                    gr.Markdown(
+                        "<span style='font-size:0.72rem;color:#64748b;font-weight:600;"
+                        "text-transform:uppercase;letter-spacing:0.08em'>"
+                        "SadTalker Settings</span>"
+                    )
+                    with gr.Row():
+                        st_expression_scale = gr.Slider(
+                            label="Expression Scale",
+                            minimum=0.5, maximum=3.0, step=0.1, value=1.0,
+                            info="How expressive the face movement is (1.0 = natural)",
+                        )
+                        st_pose_style = gr.Slider(
+                            label="Pose Style (0–45)",
+                            minimum=0, maximum=45, step=1, value=0,
+                            info="Head pose variation preset (0 = neutral)",
+                        )
+                    with gr.Row():
+                        st_still = gr.Checkbox(
+                            label="Still mode (minimize head movement)", value=True,
+                        )
+                        st_preprocess = gr.Dropdown(
+                            label="Preprocess Mode",
+                            choices=["crop", "extcrop", "resize", "full", "extfull"],
+                            value="full",
+                            info="full = paste back to original; crop = face-only output",
+                        )
+
                 with gr.Row():
                     enhance_face_cb = gr.Checkbox(
                         label="CodeFormer face enhancement", value=True
@@ -808,10 +881,17 @@ with gr.Blocks(title="Avatar Studio") as demo:
             script_box, voice_dropdown, orientation_radio, music_slider,
             background_upload, lipsync_radio, enhance_face_cb,
             add_captions_cb, preview_mode_cb, caption_fontsize, caption_position,
+            mt_batch_size, mt_bbox_shift,
+            st_expression_scale, st_pose_style, st_still, st_preprocess,
         ],
         outputs=[output_video, log_box, metadata_html, video_history],
     )
     cancel_btn.click(fn=cancel_generation, outputs=[log_box])
+    lipsync_radio.change(
+        fn=_toggle_lipsync_params,
+        inputs=[lipsync_radio],
+        outputs=[musetalk_params, sadtalker_params],
+    )
     open_folder_btn.click(fn=open_output_folder, outputs=[folder_status])
     save_settings_btn.click(
         fn=save_settings,
@@ -833,4 +913,5 @@ if __name__ == "__main__":
         theme=gr.themes.Soft(),
         css=CSS,
         favicon_path=str(ASSETS_DIR / "favicon.png"),
+        allowed_paths=[str(ROOT)],
     )

@@ -90,6 +90,9 @@ class SadTalkerInference:
         audio_wav: str,
         output_path: str | None = None,
         expression_scale: float | None = None,
+        pose_style: int = 0,
+        still: bool | None = None,
+        preprocess: str | None = None,
     ) -> str:
         """Run SadTalker inference to generate a lip-synced video.
 
@@ -118,6 +121,8 @@ class SadTalkerInference:
         Path(result_dir).mkdir(parents=True, exist_ok=True)
 
         expr_scale = expression_scale if expression_scale is not None else self.preset["expression_scale"]
+        effective_preprocess = preprocess if preprocess is not None else self.preset["preprocess"]
+        effective_still = still if still is not None else self.preset["still"]
 
         cmd = [
             str(self.venv_python),
@@ -126,11 +131,12 @@ class SadTalkerInference:
             "--driven_audio", str(audio_wav),
             "--result_dir", result_dir,
             "--size", str(self.preset["size"]),
-            "--preprocess", self.preset["preprocess"],
+            "--preprocess", effective_preprocess,
             "--expression_scale", str(expr_scale),
+            "--pose_style", str(pose_style),
         ]
 
-        if self.preset["still"]:
+        if effective_still:
             cmd.append("--still")
 
         if self.preset["enhancer"]:

@@ -109,6 +109,8 @@ class MuseTalkInference:
         avatar_png: str,
         audio_wav: str,
         output_dir: str | None = None,
+        batch_size: int = 8,
+        bbox_shift: int = 0,
     ) -> str:
         """Run MuseTalk 1.5 inference to generate a lip-synced video.
 
@@ -159,6 +161,8 @@ class MuseTalkInference:
                 "--inference_config", tmp_cfg_path,
                 "--result_dir", str(out_dir),
                 "--fps", str(self.default_fps),
+                "--batch_size", str(batch_size),
+                "--bbox_shift", str(bbox_shift),
                 "--unet_model_path", "models/musetalkV15/unet.pth",
                 "--unet_config", "models/musetalkV15/musetalk.json",
                 "--whisper_dir", "models/whisper",
