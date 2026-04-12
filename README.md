@@ -1,189 +1,48 @@
-# AI Avatar Video Generation
+# Avatar Studio
 
-A local, fully-offline HeyGen alternative running on Apple Silicon (M4 Pro / MPS).
-Generate talking-head MP4 videos from a text script with one command.
-
-```
-python make_video.py --script "Hello! I'm your AI avatar." \
-                     --orientation 9:16 \
-                     --out output/final.mp4
-```
+A fully local, offline AI avatar video generation pipeline for Apple Silicon (M4 Pro / MPS).
+Drop in a portrait photo, type a script, and get back a lip-synced, face-enhanced, captioned MP4 — no API keys, no cloud, no per-minute charges.
 
 ---
 
-## Table of Contents
+## How It Works
 
-1. [Architecture](#architecture)
-2. [Prerequisites](#prerequisites)
-3. [Quick Start](#quick-start)
-4. [CLI Reference](#cli-reference)
-5. [Pipeline Steps](#pipeline-steps)
-6. [Model Sizes](#model-sizes)
-7. [Project Structure](#project-structure)
-8. [MPS Troubleshooting](#mps-troubleshooting)
-9. [Example Commands](#example-commands)
-
----
-
-## Architecture
+The pipeline runs 7 sequential steps, each implemented as a standalone class:
 
 ```
-Text Script
+Text script
     │
-    ▼
-[1] Kokoro TTS (82M, local) ──────────────► audio/speech.wav
+    ▼  Step 1 — Voice (Kokoro TTS)
+Audio WAV (24 kHz)
     │
-    ▼
-[2] Resample 16 kHz mono ─────────────────► audio/speech_16k.wav
+    ▼  Step 2 — Resample
+Audio WAV (16 kHz mono)
     │
-    ▼
-[3] LatentSync 1.6 / MuseTalk 1.5 ───────► output/lipsync.mp4
-      (lip-sync avatar.png + audio)
+    ▼  Step 3 — Lip-sync (LatentSync 1.6 or MuseTalk 1.5)
+Raw lip-synced MP4
     │
-    ▼
-[4] CodeFormer / GFPGAN face enhancement ► output/enhanced.mp4
+    ▼  Step 4 — Face Enhancement (CodeFormer / GFPGAN / passthrough)
+Enhanced MP4
     │
-    ▼
-[5] FFmpeg background composite ──────────► output/composed.mp4
+    ▼  Step 5 — Background Composite (VideoAssembler)
+Framed MP4 (9:16 / 16:9 / 1:1)
     │
-    ▼
-[6] faster-whisper → SRT captions ────────► captions/captions.srt
+    ▼  Step 6 — Captions (faster-whisper → SRT)
+SRT subtitle file
     │
-    ▼
-[7] Final H.264/AAC encode + captions ───► output/final.mp4
+    ▼  Step 7 — Final Encode (FFmpeg H.264/AAC +faststart)
+Deliverable MP4
 ```
 
-**Runtime:** Apple M4 Pro · MPS device · Python 3.10  
-**Package manager:** uv
+**Models used (all local, all free):**
 
----
-
-## Prerequisites
-
-| Tool | Install |
-|---|---|
-| Python 3.10 | `brew install python@3.10` or `pyenv install 3.10` |
-| uv | `brew install uv` |
-| FFmpeg | `brew install ffmpeg` |
-| espeak-ng | `brew install espeak-ng` (required by Kokoro TTS) |
-| Git LFS | `brew install git-lfs && git lfs install` |
-
----
-
-## Quick Start
-
-### 1 — Install Phase 1 (MuseTalk + mmlab stack)
-
-```bash
-bash setup.sh
-```
-
-This clones MuseTalk, creates `.venv` (Python 3.10), installs all mmlab
-dependencies with the known Apple Silicon fixes, and downloads MuseTalk weights.
-
-### 2 — Install Phase 2 (LatentSync + Kokoro)
-
-```bash
-# Copy your HuggingFace token into .env first:
-echo "HF_TOKEN=hf_xxxx" >> .env
-
-bash install_latentsync.sh
-```
-
-Downloads LatentSync 1.6 weights (~6.5 GB) and installs Kokoro TTS.
-
-### 3 — Add your avatar image
-
-Place a front-facing portrait PNG at:
-
-```
-avatar/avatar.png
-```
-
-Recommended: 512×512 px, neutral expression, good lighting.
-
-### 4 — Generate a video
-
-```bash
-source .venv/bin/activate
-
-python make_video.py \
-    --script "Hello! I'm your AI assistant, ready to help." \
-    --orientation 9:16 \
-    --out output/final.mp4
-```
-
-### 5 — Run the integration test
-
-```bash
-bash test_full_pipeline.sh --no-enhance   # fast smoke test
-bash test_full_pipeline.sh                # full pipeline
-```
-
----
-
-## CLI Reference
-
-```
-python make_video.py [OPTIONS]
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `--script TEXT` | _(required)_ | Spoken script text |
-| `--orientation` | `9:16` | Canvas aspect ratio: `9:16` \| `16:9` \| `1:1` |
-| `--voice TEXT` | `af_heart` | Kokoro voice ID (see voices below) |
-| `--out TEXT` | `output/final.mp4` | Output MP4 path |
-| `--background TEXT` | `black` | `black` \| `white` \| `blur` \| `/path/to/image.jpg` |
-| `--music TEXT` | _(none)_ | Background music file (mixed at 15% volume) |
-| `--preview` | off | Open result in macOS default player |
-| `--no-captions` | off | Skip subtitle generation |
-| `--no-enhance` | off | Skip face enhancement step |
-| `--musetalk-only` | off | Use MuseTalk instead of LatentSync |
-
-### Available voices
-
-| ID | Style |
-|---|---|
-| `af_heart` | American female — warm, natural (default) |
-| `af_bella` | American female — clear |
-| `af_sarah` | American female — professional |
-| `af_nicole` | American female — calm |
-| `am_adam` | American male — deep |
-| `am_michael` | American male — conversational |
-| `bf_emma` | British female |
-| `bf_isabella` | British female |
-| `bm_george` | British male |
-| `bm_lewis` | British male |
-
----
-
-## Pipeline Steps
-
-| # | Module | What it does |
-|---|---|---|
-| 1 | `voice_gen.py` | Kokoro TTS: text → WAV |
-| 2 | `voice_gen.py` | FFmpeg resample: 44.1 kHz → 16 kHz mono |
-| 3 | `latentsync_infer.py` | LatentSync 1.6 lip-sync (or MuseTalk 1.5 with `--musetalk-only`) |
-| 4 | `face_enhancer.py` | CodeFormer frame restoration (auto-falls back to GFPGAN → passthrough) |
-| 5 | `video_assembler.py` | Composite avatar onto canvas, mix music |
-| 6 | `caption_gen.py` | faster-whisper word-level transcription → SRT |
-| 7 | `video_assembler.py` | Final H.264 / AAC encode, burn subtitles |
-
----
-
-## Model Sizes
-
-| Model | Size | Location |
-|---|---|---|
-| Kokoro-82M | ~330 MB | HuggingFace cache |
-| MuseTalk 1.5 weights | ~2.5 GB | `~/MuseTalk/models/` |
-| LatentSync UNet | 4.7 GB | `~/ComfyUI/.../checkpoints/latentsync_unet.pt` |
-| LatentSync SyncNet | 1.5 GB | `~/ComfyUI/.../checkpoints/stable_syncnet.pt` |
-| Stable Diffusion VAE | 319 MB | `~/ComfyUI/.../checkpoints/vae/` |
-| faster-whisper base | ~145 MB | HuggingFace cache |
-
-Total first-run download: **~9.5 GB**
+| Step | Model | Size | License |
+|------|-------|------|---------|
+| TTS | Kokoro-82M | ~330 MB | MIT |
+| Lip-sync (default) | LatentSync 1.6 | ~7 GB | Apache 2.0 |
+| Lip-sync (alt) | MuseTalk 1.5 | ~3 GB | Apache 2.0 |
+| Captions | faster-whisper (large-v3) | ~3 GB | MIT |
+| Face enhancement | CodeFormer / GFPGAN | optional | — |
 
 ---
 
@@ -191,87 +50,254 @@ Total first-run download: **~9.5 GB**
 
 ```
 ai-avatar-video-generation/
-├── make_video.py          # Pipeline orchestrator (entry point)
-├── voice_gen.py           # Kokoro TTS wrapper
-├── musetalk_infer.py      # MuseTalk 1.5 wrapper
-├── latentsync_infer.py    # LatentSync 1.6 wrapper
-├── face_enhancer.py       # CodeFormer/GFPGAN face restoration
-├── caption_gen.py         # faster-whisper captions + SRT
-├── video_assembler.py     # FFmpeg composite, music mix, final encode
-├── setup.sh               # Phase 1 installer (MuseTalk, mmlab, venv)
-├── install_latentsync.sh  # Phase 2 installer (LatentSync, Kokoro)
-├── test_full_pipeline.sh  # Integration smoke test
-├── requirements.txt       # Python deps for pipeline .venv
+│
+├── avatarpipeline/           # Core library package
+│   ├── __init__.py           # ROOT, data-dir constants, version
+│   ├── pipeline.py           # 7-step orchestrator (run_pipeline)
+│   ├── voice/
+│   │   └── kokoro.py         # VoiceGenerator — Kokoro TTS
+│   ├── lipsync/
+│   │   ├── latentsync.py     # LatentSyncInference — lip-sync (default)
+│   │   └── musetalk.py       # MuseTalkInference   — lip-sync (alt)
+│   └── postprocess/
+│       ├── enhancer.py       # FaceEnhancer — CodeFormer / GFPGAN
+│       ├── captions.py       # CaptionGenerator — faster-whisper
+│       └── assembler.py      # VideoAssembler — FFmpeg composite + encode
+│
+├── ui/
+│   └── dashboard.py          # Gradio web dashboard
+│
+├── scripts/
+│   ├── run_dashboard.py      # ← Start the dashboard (main entry point)
+│   ├── run_pipeline.py       # CLI pipeline runner
+│   └── smoke_test.sh         # End-to-end integration test
+│
+├── install/
+│   ├── setup.sh              # Phase 1: system deps, Python venv, MuseTalk
+│   └── install_latentsync.sh # Phase 2: LatentSync + ComfyUI wrapper
+│
 ├── configs/
-│   └── settings.yaml      # Global settings (FPS, orientations, voices)
-├── avatar/
-│   └── avatar.png         # Your portrait image (you provide this)
-├── audio/                 # Intermediate WAV files
-├── captions/              # Generated SRT files
-├── output/                # All generated MP4s
-└── .env                   # Secrets: HF_TOKEN, ELEVENLABS_KEY (git-ignored)
+│   └── settings.yaml         # All pipeline settings
+│
+├── assets/
+│   ├── logo.png
+│   └── favicon.png
+│
+├── tests/
+│   └── test_pipeline.py      # 17 pytest unit + integration tests
+│
+├── data/                     # Runtime data — git-ignored
+│   ├── avatars/              # avatar.png lives here
+│   ├── audio/                # TTS output WAVs
+│   ├── output/               # Generated MP4s
+│   ├── captions/             # SRT subtitle files
+│   └── temp/                 # Intermediate files
+│
+├── requirements.txt
+├── .env                      # Optional: HF_TOKEN etc. (git-ignored)
+└── README.md
 ```
+
+---
+
+## Quick Start
+
+### 1. Install system dependencies
+
+```bash
+brew install python@3.10 git ffmpeg uv espeak-ng
+```
+
+### 2. Set up the Python environment
+
+```bash
+cd ai-avatar-video-generation
+bash install/setup.sh
+```
+
+Creates `.venv/` with Python 3.10 and all Python dependencies.
+
+### 3. Install LatentSync (lip-sync model)
+
+```bash
+bash install/install_latentsync.sh
+```
+
+Clones ComfyUI-LatentSyncWrapper and downloads LatentSync 1.6 checkpoints (~7 GB).
+
+### 4. Add your avatar
+
+```bash
+# Copy a portrait PNG into the data directory
+cp /path/to/portrait.png data/avatars/avatar.png
+```
+
+Or upload it via the dashboard UI.
+
+---
+
+## Starting the Dashboard
+
+```bash
+python scripts/run_dashboard.py
+```
+
+Opens automatically at **http://localhost:7860**.
+
+Optional flags:
+
+```bash
+python scripts/run_dashboard.py --port 7861        # custom port
+python scripts/run_dashboard.py --no-browser       # no auto-open
+python scripts/run_dashboard.py --host 0.0.0.0     # expose on LAN
+python scripts/run_dashboard.py --share            # Gradio public link
+```
+
+### Dashboard walkthrough
+
+1. **Avatar** — Upload a portrait PNG or select from the gallery. The full image is visible (not cropped).
+2. **Script** — Type the text your avatar will speak. Character count updates live.
+3. **Voice** — 10 Kokoro voices available. Use the preview button to audition each one.
+4. **Video Settings** — Choose orientation (9:16 / 16:9 / 1:1), optional background music, optional background image.
+5. **Advanced Options** — Toggle LatentSync vs MuseTalk, face enhancement, captions, preview mode, caption styling.
+6. **Generate Video** — Starts the pipeline. Live log shows progress for all 7 steps with timing.
+7. **Output** — Finished video plays inline. Metadata panel shows resolution, duration, file size, and generation time.
+
+---
+
+## CLI Usage
+
+```bash
+# Basic (portrait 9:16, default voice)
+python scripts/run_pipeline.py \
+  --script "Hello, I'm your AI avatar — nice to meet you!" \
+  --out data/output/my_video.mp4
+
+# British male voice, landscape orientation
+python scripts/run_pipeline.py \
+  --script "Welcome to the briefing." \
+  --voice bm_george \
+  --orientation 16:9
+
+# Fast preview — skip face enhancement and captions
+python scripts/run_pipeline.py \
+  --script "Quick test." \
+  --no-enhance --no-captions
+
+# List all available voices
+python scripts/run_pipeline.py --list-voices
+```
+
+**All flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--script TEXT` | _(required)_ | Spoken script text |
+| `--orientation` | `9:16` | `9:16` \| `16:9` \| `1:1` |
+| `--voice TEXT` | `af_heart` | Kokoro voice ID |
+| `--out TEXT` | `data/output/final.mp4` | Output MP4 path |
+| `--background TEXT` | `black` | `black` \| `white` \| `blur` \| path to image |
+| `--music TEXT` | _(none)_ | Background music file |
+| `--preview` | off | Open result in default player |
+| `--no-captions` | off | Skip subtitle generation |
+| `--no-enhance` | off | Skip face enhancement |
+| `--musetalk` | off | Use MuseTalk instead of LatentSync |
+
+---
+
+## Running Tests
+
+```bash
+# Full unit test suite (17 tests, ~30s)
+python -m pytest tests/ -v
+
+# End-to-end smoke test
+bash scripts/smoke_test.sh --no-enhance --no-captions
+```
+
+---
+
+## Configuration
+
+Edit `configs/settings.yaml` to adjust pipeline behaviour:
+
+```yaml
+musetalk_dir: "~/MuseTalk"
+comfyui_dir:  "~/ComfyUI"
+
+latentsync:
+  inference_steps: 25     # higher = better quality, slower
+  lips_expression: 1.5    # lip movement intensity
+  face_resolution: 512
+
+tts:
+  engine: "kokoro"
+  default_voice: "af_heart"
+  speed: 1.0
+  lang_code: "a"          # 'a' = American, 'b' = British
+```
+
+---
+
+## Available Voices
+
+| ID | Description |
+|----|-------------|
+| `af_heart` | American Female — warm, clear (default) |
+| `af_bella` | American Female — smooth, confident |
+| `af_sarah` | American Female — natural, conversational |
+| `af_nicole` | American Female — soft, friendly |
+| `am_adam` | American Male — deep |
+| `am_michael` | American Male — conversational |
+| `bf_emma` | British Female — clear |
+| `bf_isabella` | British Female — warm |
+| `bm_george` | British Male — authoritative |
+| `bm_lewis` | British Male — natural |
+
+---
+
+## Architecture Notes
+
+`avatarpipeline/` is a proper Python package. Import any class directly:
+
+```python
+from avatarpipeline.voice.kokoro import VoiceGenerator
+from avatarpipeline.lipsync.latentsync import LatentSyncInference
+from avatarpipeline.postprocess.assembler import VideoAssembler
+from avatarpipeline.pipeline import run_pipeline
+```
+
+`avatarpipeline/__init__.py` exports `ROOT`, `AVATARS_DIR`, `AUDIO_DIR`, `OUTPUT_DIR`, `CAPTIONS_DIR`, `TEMP_DIR` as `Path` constants so every module resolves paths consistently relative to the project root.
+
+`ui/dashboard.py` is a consumer of the library, not part of it. `scripts/` contains thin entry-point wrappers that add the project root to `sys.path` and delegate to the library.
 
 ---
 
 ## MPS Troubleshooting
 
-The pipeline automatically sets these env vars before any model inference:
+The pipeline automatically sets:
 
 ```bash
-export PYTORCH_ENABLE_MPS_FALLBACK=1    # fall back to CPU for unsupported ops
-export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0  # prevent OOM by avoiding memory reserve
+PYTORCH_ENABLE_MPS_FALLBACK=1       # fall back to CPU for unsupported ops
+PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0  # prevent OOM
 ```
 
-**Common issues:**
-
 | Symptom | Fix |
-|---|---|
-| `RuntimeError: MPS backend out of memory` | Close other GPU-heavy apps, add `--no-enhance` to free VRAM |
-| `NotImplementedError: ... not implemented for MPS` | Already handled by `MPS_FALLBACK=1`; if still failing, open an issue |
-| `faster-whisper` slow on CPU | Expected — faster-whisper uses CPU/int8 on Apple Silicon (MPS not supported natively) |
-| LatentSync output faces are blurry | Increase `inference_steps` in `configs/settings.yaml` (default: 25) |
-| Black frames in output | Check that `avatar/avatar.png` is a clear front-facing portrait, ≥ 256×256 px |
+|---------|-----|
+| `MPS backend out of memory` | Close other GPU apps; add `--no-enhance` |
+| LatentSync faces blurry | Raise `inference_steps` in `configs/settings.yaml` |
+| Black frames | Use a clear front-facing portrait, ≥ 256×256 px |
+| `faster-whisper` slow | Expected — CPU int8 is used (MPS unsupported by faster-whisper) |
 
 ---
 
-## Example Commands
+## Requirements
 
-```bash
-# Vertical short-form video (TikTok / Reels)
-python make_video.py \
-    --script "Top 5 Python tips every developer should know!" \
-    --orientation 9:16 \
-    --voice am_adam \
-    --out output/python_tips.mp4
-
-# Landscape explainer (YouTube / LinkedIn)
-python make_video.py \
-    --script "Let me walk you through our Q3 results." \
-    --orientation 16:9 \
-    --background blur \
-    --out output/quarterly_review.mp4
-
-# Square post with background music
-python make_video.py \
-    --script "Welcome to our product launch!" \
-    --orientation 1:1 \
-    --music assets/bg_music.mp3 \
-    --out output/launch.mp4
-
-# Fast preview (skip enhancement + captions)
-python make_video.py \
-    --script "Quick test run." \
-    --no-enhance --no-captions \
-    --preview \
-    --out output/preview.mp4
-
-# Force MuseTalk (faster, lower quality)
-python make_video.py \
-    --script "MuseTalk test." \
-    --musetalk-only \
-    --out output/musetalk_test.mp4
-```
+- macOS 14+ with Apple Silicon (M1 / M2 / M3 / M4)
+- Python 3.10
+- FFmpeg (`brew install ffmpeg`)
+- espeak-ng (`brew install espeak-ng`)
+- ~10 GB free disk space for models
 
 ---
 

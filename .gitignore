@@ -205,3 +205,28 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ── Avatar Pipeline — runtime data (auto-generated, not committed) ────────────
+data/audio/
+data/output/
+data/captions/
+data/temp/
+# Keep avatars tracked (images are user-provided content)
+!data/avatars/
+
+# ── Legacy directories (moved to data/) ─────────────────────────────────────
+audio/
+output/
+captions/
+temp/
+
+# ── Python caches ─────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+
+# ── Environment ───────────────────────────────────────────────────────────────
+.env
+.venv/
+
+# ── Test outputs ──────────────────────────────────────────────────────────────
+tests/_test_output/

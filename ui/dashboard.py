@@ -1,0 +1,825 @@
+#!/usr/bin/env python3
+"""
+ui.dashboard — Gradio web dashboard for the AI Avatar Video Pipeline.
+
+Start with:
+    python scripts/run_dashboard.py
+    — or —
+    python -m ui.dashboard
+
+Opens automatically at http://localhost:7860
+"""
+
+import base64
+import glob
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+import gradio as gr
+import yaml
+from loguru import logger
+from PIL import Image
+
+# ── Project root ────────────────────────────────────────────────────────────
+# ui/dashboard.py lives one level below the project root
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from avatarpipeline import (
+    ASSETS_DIR,
+    AUDIO_DIR,
+    AVATARS_DIR,
+    CAPTIONS_DIR,
+    OUTPUT_DIR,
+)
+
+CONFIG_PATH = ROOT / "configs" / "settings.yaml"
+ENV_PATH    = ROOT / ".env"
+
+# MPS tuning
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+
+# ── Voice mapping ────────────────────────────────────────────────────────────
+VOICE_CHOICES = {
+    "Heart — Warm Female (default)": "af_heart",
+    "Bella — Confident Female":      "af_bella",
+    "Sarah — Natural Female":        "af_sarah",
+    "Nicole — Soft Female":          "af_nicole",
+    "Adam — Deep Male":              "am_adam",
+    "Michael — Conversational Male": "am_michael",
+    "Emma — British Female":         "bf_emma",
+    "Isabella — British Female":     "bf_isabella",
+    "George — British Male":         "bm_george",
+    "Lewis — British Male":          "bm_lewis",
+}
+
+ORIENTATION_MAP = {
+    "📱 Portrait 9:16":  "9:16",
+    "🖥️ Landscape 16:9": "16:9",
+    "⬛ Square 1:1":     "1:1",
+}
+
+_cancel_event = threading.Event()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _ts() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _load_config() -> dict:
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH) as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+def _save_config(cfg: dict) -> None:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_PATH, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+
+
+# ── Avatar helpers ───────────────────────────────────────────────────────────
+
+def save_uploaded_avatar(file_path: str) -> tuple[str | None, str, list]:
+    """Save uploaded avatar, resize to 512×512, return (preview, message, gallery)."""
+    if file_path is None:
+        return None, "No file selected.", get_avatar_gallery()
+
+    try:
+        img = Image.open(file_path).convert("RGB")
+        target = 512
+        ratio = min(target / img.width, target / img.height)
+        new_w = int(img.width * ratio)
+        new_h = int(img.height * ratio)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        canvas = Image.new("RGB", (target, target), (255, 255, 255))
+        canvas.paste(img, ((target - new_w) // 2, (target - new_h) // 2))
+
+        dest = AVATARS_DIR / "avatar.png"
+        canvas.save(str(dest), "PNG")
+        return str(dest), f"✅ Avatar saved ({new_w}×{new_h} → 512×512)", get_avatar_gallery()
+    except Exception as e:
+        return None, f"❌ Upload failed: {e}", get_avatar_gallery()
+
+
+def get_avatar_gallery() -> list[str]:
+    files = []
+    for p in ["*.png", "*.jpg", "*.jpeg"]:
+        files.extend(glob.glob(str(AVATARS_DIR / p)))
+    return sorted(files, key=os.path.getmtime, reverse=True)
+
+
+def select_avatar_from_gallery(evt: gr.SelectData) -> tuple[str | None, str]:
+    gallery = get_avatar_gallery()
+    if evt.index < len(gallery):
+        selected = gallery[evt.index]
+        dest = AVATARS_DIR / "avatar.png"
+        if Path(selected).resolve() != dest.resolve():
+            shutil.copy(selected, str(dest))
+        return str(dest), f"✅ Selected: {Path(selected).name}"
+    return None, "Selection failed."
+
+
+# ── Video history ────────────────────────────────────────────────────────────
+
+def get_video_history() -> list[str]:
+    files = glob.glob(str(OUTPUT_DIR / "*.mp4"))
+    files.sort(key=os.path.getmtime, reverse=True)
+    return files[:10]
+
+
+def open_output_folder() -> str:
+    subprocess.Popen(["open", str(OUTPUT_DIR)])
+    return f"📂 Opened {OUTPUT_DIR}"
+
+
+# ── Voice preview ────────────────────────────────────────────────────────────
+
+def generate_voice_preview(voice_display: str) -> str | None:
+    voice_id = VOICE_CHOICES.get(voice_display)
+    if not voice_id:
+        return None
+    try:
+        from avatarpipeline.voice.kokoro import VoiceGenerator
+        vg = VoiceGenerator()
+        name = voice_display.split("—")[0].strip()
+        out = str(AUDIO_DIR / f"preview_{voice_id}.wav")
+        vg.generate(f"Hello, I'm {name}. Nice to meet you!", voice=voice_id, out_path=out)
+        return out
+    except Exception as e:
+        logger.warning(f"Voice preview failed: {e}")
+        return None
+
+
+# ── Settings ─────────────────────────────────────────────────────────────────
+
+def load_settings() -> tuple[str, str]:
+    cfg = _load_config()
+    key = cfg.get("elevenlabs_key", "") or ""
+    status = "✅ Key configured" if key else "ℹ️  No API key needed — using local Kokoro TTS (free)"
+    return key, status
+
+
+def save_settings(api_key: str) -> str:
+    cfg = _load_config()
+    cfg["elevenlabs_key"] = api_key
+    _save_config(cfg)
+    return "✅ Settings saved"
+
+
+# ── Character counter ────────────────────────────────────────────────────────
+
+def update_char_count(text: str) -> str:
+    n = len(text) if text else 0
+    return f"<span style='color:#94a3b8;font-size:0.82rem'>{n:,} characters · Kokoro TTS (local, free)</span>"
+
+
+# ── Video metadata card ──────────────────────────────────────────────────────
+
+def get_video_metadata(video_path: str, gen_time_secs: float) -> str:
+    if not video_path or not Path(video_path).exists():
+        return ""
+    try:
+        size_mb = Path(video_path).stat().st_size / 1_048_576
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,duration",
+            "-of", "default=noprint_wrappers=1",
+            video_path,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        width = height = duration = "?"
+        for line in r.stdout.strip().split("\n"):
+            if line.startswith("width="):
+                width = line.split("=")[1]
+            elif line.startswith("height="):
+                height = line.split("=")[1]
+            elif line.startswith("duration="):
+                duration = f"{float(line.split('=')[1]):.1f}s"
+
+        gm = int(gen_time_secs) // 60
+        gs = int(gen_time_secs) % 60
+        return (
+            "<div class='metadata-card'>"
+            f"<div class='stat-row'><span class='stat-label'>Resolution</span>"
+            f"<span class='stat-value'>{width}×{height}</span></div>"
+            f"<div class='stat-row'><span class='stat-label'>Duration</span>"
+            f"<span class='stat-value'>{duration}</span></div>"
+            f"<div class='stat-row'><span class='stat-label'>File Size</span>"
+            f"<span class='stat-value'>{size_mb:.1f} MB</span></div>"
+            f"<div class='stat-row'><span class='stat-label'>Generated in</span>"
+            f"<span class='stat-value'>{gm}m {gs}s</span></div>"
+            "</div>"
+        )
+    except Exception:
+        return ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main generation function (streaming progress via yield)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def generate_video(
+    script: str,
+    voice_choice: str,
+    orientation: str,
+    music_volume: float,
+    background_file: str | None,
+    use_latentsync: bool,
+    enhance_face: bool,
+    add_captions: bool,
+    preview_mode: bool,
+    caption_font_size: int,
+    caption_position: str,
+    progress=gr.Progress(track_tqdm=False),
+):
+    """Run the full 7-step pipeline, streaming progress updates to the UI."""
+    _cancel_event.clear()
+    log_lines: list[str] = []
+    wall_start = time.time()
+    step = 0
+
+    def log(msg: str):
+        log_lines.append(f"[{_ts()}] {msg}")
+
+    def current_log() -> str:
+        return "\n".join(log_lines)
+
+    if not script or not script.strip():
+        log("❌ ERROR: Script is empty.")
+        yield None, current_log(), "", get_video_history()
+        return
+
+    avatar_png = AVATARS_DIR / "avatar.png"
+    if not avatar_png.exists():
+        log("❌ ERROR: No avatar image found. Upload a PNG in the Avatar section.")
+        yield None, current_log(), "", get_video_history()
+        return
+
+    voice_id    = VOICE_CHOICES.get(voice_choice, "af_heart")
+    orient_code = ORIENTATION_MAP.get(orientation, "9:16")
+    background  = str(background_file) if background_file and Path(background_file).exists() else "black"
+
+    run_id      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = str(OUTPUT_DIR / f"studio_{run_id}.mp4")
+
+    TOTAL = 7
+    step_labels = [
+        "Generating voice audio",
+        "Converting to 16 kHz",
+        "Running lip-sync",
+        "Enhancing face",
+        "Compositing background",
+        "Generating captions",
+        "Final encode",
+    ]
+
+    log("Pipeline starting...")
+    log(f"   Voice: {voice_choice} ({voice_id})")
+    log(f"   Orientation: {orient_code}")
+    log(f"   Script: {len(script)} chars")
+    progress(0, desc="Starting pipeline...")
+    yield None, current_log(), "", get_video_history()
+
+    try:
+        from avatarpipeline.voice.kokoro import VoiceGenerator
+        from avatarpipeline.postprocess.assembler import VideoAssembler
+    except ImportError as e:
+        log(f"❌ ERROR: Module import failed: {e}")
+        yield None, current_log(), "", get_video_history()
+        return
+
+    try:
+        # ── STEP 1: TTS ──────────────────────────────────────────────────
+        if _cancel_event.is_set():
+            log("⏹ Cancelled by user.")
+            yield None, current_log(), "", get_video_history()
+            return
+
+        step = 1
+        log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
+        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: TTS")
+        yield None, current_log(), "", get_video_history()
+
+        t0 = time.time()
+        vg = VoiceGenerator()
+        speech_wav = str(AUDIO_DIR / f"speech_{run_id}.wav")
+        vg.generate(script, voice=voice_id, out_path=speech_wav)
+        log(f"STEP {step}/{TOTAL}: ✅ Voice generated ({time.time()-t0:.1f}s)")
+        yield None, current_log(), "", get_video_history()
+
+        # ── STEP 2: Resample ─────────────────────────────────────────────
+        if _cancel_event.is_set():
+            log("⏹ Cancelled by user.")
+            yield None, current_log(), "", get_video_history()
+            return
+
+        step = 2
+        log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
+        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Audio prep")
+        yield None, current_log(), "", get_video_history()
+
+        t0 = time.time()
+        speech_16k = str(AUDIO_DIR / f"speech_{run_id}_16k.wav")
+        vg.convert_to_16k(speech_wav, speech_16k)
+        log(f"STEP {step}/{TOTAL}: ✅ Audio ready ({time.time()-t0:.1f}s)")
+        yield None, current_log(), "", get_video_history()
+
+        # ── STEP 3: Lip-sync ─────────────────────────────────────────────
+        if _cancel_event.is_set():
+            log("⏹ Cancelled by user.")
+            yield None, current_log(), "", get_video_history()
+            return
+
+        step = 3
+        engine = "LatentSync 1.6" if use_latentsync else "MuseTalk 1.5"
+        log(f"STEP {step}/{TOTAL}: Running {engine} lip-sync...")
+        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Lip-sync ({engine})")
+        yield None, current_log(), "", get_video_history()
+
+        t0 = time.time()
+        lipsync_mp4 = str(OUTPUT_DIR / f"lipsync_{run_id}.mp4")
+
+        if use_latentsync:
+            from avatarpipeline.lipsync.latentsync import LatentSyncInference
+            ls = LatentSyncInference()
+            lipsync_mp4 = ls.run(str(avatar_png), speech_16k, output_path=lipsync_mp4)
+        else:
+            from avatarpipeline.lipsync.musetalk import MuseTalkInference
+            ms = MuseTalkInference()
+            ms.prepare_avatar(str(avatar_png))
+            lipsync_mp4 = ms.run(str(avatar_png), speech_16k)
+
+        em, es = divmod(int(time.time() - t0), 60)
+        log(f"STEP {step}/{TOTAL}: ✅ Lip-sync complete ({em}m {es}s)")
+        yield None, current_log(), "", get_video_history()
+
+        # ── STEP 4: Face enhancement ──────────────────────────────────────
+        step = 4
+        enhanced_mp4 = str(OUTPUT_DIR / f"enhanced_{run_id}.mp4")
+
+        if enhance_face and not preview_mode:
+            if _cancel_event.is_set():
+                log("⏹ Cancelled by user.")
+                yield None, current_log(), "", get_video_history()
+                return
+
+            log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
+            progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Enhance")
+            yield None, current_log(), "", get_video_history()
+
+            t0 = time.time()
+            from avatarpipeline.postprocess.enhancer import FaceEnhancer
+            fe = FaceEnhancer()
+            enhanced_mp4 = fe.enhance(lipsync_mp4, enhanced_mp4)
+            log(f"STEP {step}/{TOTAL}: ✅ Enhancement done ({time.time()-t0:.1f}s)")
+        else:
+            shutil.copy(lipsync_mp4, enhanced_mp4)
+            log(f"STEP {step}/{TOTAL}: ⏭️  Enhancement skipped")
+        yield None, current_log(), "", get_video_history()
+
+        # ── STEP 5: Background composite ─────────────────────────────────
+        if _cancel_event.is_set():
+            log("⏹ Cancelled by user.")
+            yield None, current_log(), "", get_video_history()
+            return
+
+        step = 5
+        log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
+        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Composite")
+        yield None, current_log(), "", get_video_history()
+
+        t0 = time.time()
+        va = VideoAssembler()
+        composed_mp4 = str(OUTPUT_DIR / f"composed_{run_id}.mp4")
+        composed_mp4 = va.add_background(
+            enhanced_mp4, orientation=orient_code,
+            background=background, output_path=composed_mp4,
+        )
+
+        if music_volume > 0 and background_file and Path(background_file).suffix.lower() in (".mp3", ".wav", ".m4a"):
+            music_out = composed_mp4.replace(".mp4", "_music.mp4")
+            composed_mp4 = va.add_music(composed_mp4, str(background_file), music_volume=music_volume, output_path=music_out)
+
+        log(f"STEP {step}/{TOTAL}: ✅ Composite done ({time.time()-t0:.1f}s)")
+        yield None, current_log(), "", get_video_history()
+
+        # ── STEP 6: Captions ─────────────────────────────────────────────
+        step = 6
+        srt_path = None
+
+        if add_captions and not preview_mode:
+            if _cancel_event.is_set():
+                log("⏹ Cancelled by user.")
+                yield None, current_log(), "", get_video_history()
+                return
+
+            log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
+            progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Captions")
+            yield None, current_log(), "", get_video_history()
+
+            t0 = time.time()
+            from avatarpipeline.postprocess.captions import CaptionGenerator
+            cg = CaptionGenerator()
+            srt_path = str(CAPTIONS_DIR / f"captions_{run_id}.srt")
+            srt_path = cg.transcribe(speech_16k, srt_path)
+            log(f"STEP {step}/{TOTAL}: ✅ Captions generated ({time.time()-t0:.1f}s)")
+        else:
+            log(f"STEP {step}/{TOTAL}: ⏭️  Captions skipped")
+        yield None, current_log(), "", get_video_history()
+
+        # ── STEP 7: Final encode ──────────────────────────────────────────
+        if _cancel_event.is_set():
+            log("⏹ Cancelled by user.")
+            yield None, current_log(), "", get_video_history()
+            return
+
+        step = 7
+        log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
+        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Encoding")
+        yield None, current_log(), "", get_video_history()
+
+        t0 = time.time()
+        va.finalize(
+            composed_mp4, output_path,
+            srt_path=srt_path,
+            include_captions=(add_captions and not preview_mode),
+        )
+        log(f"STEP {step}/{TOTAL}: ✅ Final encode done ({time.time()-t0:.1f}s)")
+
+        wall_secs = time.time() - wall_start
+        m, s = int(wall_secs) // 60, int(wall_secs) % 60
+        log("")
+        log(f"🎉 Pipeline complete in {m}m {s}s")
+        log(f"📁 Output: {output_path}")
+        progress(1.0, desc="Done!")
+
+        yield output_path, current_log(), get_video_metadata(output_path, wall_secs), get_video_history()
+
+    except Exception as exc:
+        log("")
+        log(f"❌ ERROR at STEP {step}/{TOTAL}: {exc}")
+        logger.error(f"Dashboard pipeline error: {exc}")
+        for p in OUTPUT_DIR.glob(f"*{run_id}*"):
+            if "studio_" not in p.name:
+                p.unlink(missing_ok=True)
+        yield None, current_log(), "", get_video_history()
+
+
+def cancel_generation():
+    _cancel_event.set()
+    return f"[{_ts()}] ⏹ Cancel requested — stopping after current step..."
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Logo embedding
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_logo_b64 = ""
+_logo_path = ASSETS_DIR / "logo.png"
+if _logo_path.exists():
+    _logo_b64 = base64.b64encode(_logo_path.read_bytes()).decode()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Professional CSS — BCG / McKinsey consulting aesthetic
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CSS = """
+/* ── Foundation ──────────────────────────────────────────────────────────── */
+.gradio-container {
+    max-width: 1180px !important;
+    margin: 0 auto !important;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+.studio-header {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+    border-radius: 16px;
+    padding: 28px 32px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    border: 1px solid rgba(255,255,255,0.06);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+}
+.studio-header .logo-img {
+    width: 56px; height: 56px;
+    border-radius: 12px; flex-shrink: 0;
+}
+.studio-header h1 {
+    font-size: 1.6rem; font-weight: 700; margin: 0;
+    color: #f1f5f9; letter-spacing: -0.02em;
+}
+.studio-header .tagline {
+    color: #94a3b8; margin: 4px 0 0 0;
+    font-size: 0.88rem; font-weight: 400;
+}
+.studio-header .badge-row { display: flex; gap: 8px; margin-top: 10px; }
+.studio-header .badge {
+    display: inline-block; padding: 3px 12px;
+    border-radius: 20px; font-size: 0.72rem;
+    font-weight: 500; letter-spacing: 0.03em;
+}
+.studio-header .badge-ready {
+    background: rgba(16,185,129,0.12); color: #34d399;
+    border: 1px solid rgba(16,185,129,0.25);
+}
+.studio-header .badge-local {
+    background: rgba(99,102,241,0.12); color: #a5b4fc;
+    border: 1px solid rgba(99,102,241,0.25);
+}
+.studio-header .badge-mps {
+    background: rgba(251,191,36,0.12); color: #fcd34d;
+    border: 1px solid rgba(251,191,36,0.25);
+}
+
+/* ── Section Labels ──────────────────────────────────────────────────────── */
+.section-label {
+    font-size: 0.72rem !important; font-weight: 600 !important;
+    text-transform: uppercase !important; letter-spacing: 0.1em !important;
+    color: #64748b !important; margin: 0 0 8px 0 !important;
+    padding: 0 0 6px 0 !important; border-bottom: 2px solid #e2e8f0 !important;
+}
+
+/* ── Avatar Display — full image visible ─────────────────────────────────── */
+.avatar-display img {
+    object-fit: contain !important; max-height: 260px !important;
+    width: 100% !important; border-radius: 8px !important;
+    background: #f8fafc !important;
+}
+
+/* ── Generate Button ─────────────────────────────────────────────────────── */
+.generate-btn {
+    font-size: 15px !important; font-weight: 600 !important;
+    padding: 14px 28px !important;
+    background: linear-gradient(135deg, #0d9488 0%, #10b981 100%) !important;
+    border: none !important; border-radius: 10px !important;
+    letter-spacing: 0.02em !important; transition: all 0.2s ease !important;
+    box-shadow: 0 2px 8px rgba(13,148,136,0.25) !important;
+}
+.generate-btn:hover {
+    opacity: 0.92 !important;
+    box-shadow: 0 4px 16px rgba(13,148,136,0.35) !important;
+    transform: translateY(-1px) !important;
+}
+.cancel-btn { border-radius: 10px !important; font-weight: 500 !important; }
+
+/* ── Log Box ─────────────────────────────────────────────────────────────── */
+.log-box textarea {
+    font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Menlo', monospace !important;
+    font-size: 11px !important; background: #0f172a !important;
+    color: #cbd5e1 !important; border-radius: 8px !important;
+    line-height: 1.65 !important; padding: 12px !important;
+    border: 1px solid #1e293b !important;
+}
+
+/* ── Output Video ────────────────────────────────────────────────────────── */
+.output-video { border-radius: 10px !important; overflow: hidden !important; }
+
+/* ── Metadata Card ───────────────────────────────────────────────────────── */
+.metadata-card { font-size: 13px; line-height: 1.7; }
+.metadata-card .stat-row {
+    display: flex; justify-content: space-between;
+    padding: 6px 0; border-bottom: 1px solid #f1f5f9;
+}
+.metadata-card .stat-label { color: #64748b; font-weight: 500; }
+.metadata-card .stat-value { color: #1e293b; font-weight: 600; }
+
+/* ── Misc ────────────────────────────────────────────────────────────────── */
+footer { display: none !important; }
+.separator-line {
+    height: 1px;
+    background: linear-gradient(to right, transparent, #e2e8f0 20%, #e2e8f0 80%, transparent);
+    margin: 16px 0; border: none;
+}
+"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Gradio UI
+# ═══════════════════════════════════════════════════════════════════════════════
+
+with gr.Blocks(title="Avatar Studio") as demo:
+
+    # ── Header ───────────────────────────────────────────────────────────────
+    logo_tag = (
+        f'<img class="logo-img" src="data:image/png;base64,{_logo_b64}" alt="Logo"/>'
+        if _logo_b64 else ""
+    )
+    gr.HTML(f"""
+        <div class="studio-header">
+            {logo_tag}
+            <div>
+                <h1>Avatar Studio</h1>
+                <p class="tagline">AI-Powered Avatar Video Generation</p>
+                <div class="badge-row">
+                    <span class="badge badge-ready">● Pipeline Ready</span>
+                    <span class="badge badge-local">Fully Offline</span>
+                    <span class="badge badge-mps">Apple M4 Pro · MPS</span>
+                </div>
+            </div>
+        </div>
+    """)
+
+    # ── Main content: Avatar (left) + Script/Voice/Settings (right) ──────────
+    with gr.Row(equal_height=False):
+
+        with gr.Column(scale=1, min_width=280):
+            gr.Markdown("<p class='section-label'>Avatar</p>")
+            avatar_upload = gr.Image(
+                label="Upload or drop avatar image",
+                type="filepath",
+                height=260,
+                elem_classes=["avatar-display"],
+            )
+            avatar_status = gr.Textbox(
+                interactive=False, lines=1, show_label=False,
+                value=(
+                    "Active: data/avatars/avatar.png"
+                    if (AVATARS_DIR / "avatar.png").exists()
+                    else "No avatar uploaded"
+                ),
+            )
+            avatar_gallery = gr.Gallery(
+                label="Saved Avatars",
+                value=get_avatar_gallery(),
+                columns=3, height=130, allow_preview=False,
+            )
+
+        with gr.Column(scale=3):
+            gr.Markdown("<p class='section-label'>Script</p>")
+            script_box = gr.Textbox(
+                label="Enter script",
+                placeholder="Type or paste the text your avatar will speak…",
+                lines=5, show_label=False,
+            )
+            char_counter = gr.Markdown(
+                "<span style='color:#94a3b8;font-size:0.82rem'>0 characters · Kokoro TTS (local, free)</span>"
+            )
+
+            gr.Markdown("<p class='section-label'>Voice</p>")
+            with gr.Row():
+                voice_dropdown = gr.Dropdown(
+                    label="Select voice",
+                    choices=list(VOICE_CHOICES.keys()),
+                    value="Heart — Warm Female (default)",
+                    scale=2, show_label=False,
+                )
+                voice_preview = gr.Audio(
+                    label="Preview", type="filepath",
+                    interactive=False, scale=2,
+                )
+
+            gr.Markdown("<p class='section-label'>Video Settings</p>")
+            with gr.Row():
+                orientation_radio = gr.Radio(
+                    label="Orientation",
+                    choices=list(ORIENTATION_MAP.keys()),
+                    value="📱 Portrait 9:16", scale=2,
+                )
+                music_slider = gr.Slider(
+                    label="Music Volume",
+                    minimum=0.0, maximum=1.0, step=0.05, value=0.15, scale=1,
+                )
+                background_upload = gr.File(
+                    label="Background / Music",
+                    file_types=["image", ".mp4", ".mp3", ".wav", ".m4a"],
+                    scale=1,
+                )
+
+            with gr.Accordion("Advanced Options", open=False):
+                with gr.Row():
+                    use_latentsync_cb = gr.Checkbox(
+                        label="LatentSync 1.6 (higher quality, slower)", value=True
+                    )
+                    enhance_face_cb = gr.Checkbox(
+                        label="CodeFormer face enhancement", value=True
+                    )
+                with gr.Row():
+                    add_captions_cb = gr.Checkbox(
+                        label="Auto-generated captions", value=True
+                    )
+                    preview_mode_cb = gr.Checkbox(
+                        label="Preview mode (faster, lower quality)", value=False
+                    )
+                with gr.Row():
+                    caption_fontsize = gr.Slider(
+                        label="Caption Font Size",
+                        minimum=12, maximum=32, step=1, value=20,
+                    )
+                    caption_position = gr.Dropdown(
+                        label="Caption Position",
+                        choices=["Bottom", "Center", "Top"], value="Bottom",
+                    )
+
+    # ── Generate controls ────────────────────────────────────────────────────
+    gr.HTML('<div class="separator-line"></div>')
+    with gr.Row():
+        generate_btn = gr.Button(
+            "Generate Video", variant="primary", scale=3,
+            elem_classes=["generate-btn"],
+        )
+        cancel_btn = gr.Button(
+            "Cancel", variant="stop", scale=1,
+            elem_classes=["cancel-btn"],
+        )
+
+    log_box = gr.Textbox(
+        label="Pipeline Log", lines=10,
+        interactive=False, elem_classes=["log-box"],
+    )
+
+    # ── Output ───────────────────────────────────────────────────────────────
+    gr.Markdown("<p class='section-label'>Output</p>")
+    with gr.Row():
+        output_video = gr.Video(
+            label="Generated Video",
+            elem_classes=["output-video"], scale=3,
+        )
+        with gr.Column(scale=1):
+            metadata_html = gr.HTML(value="")
+            open_folder_btn = gr.Button("Open Output Folder", size="sm")
+            folder_status = gr.Textbox(visible=False)
+
+    video_history = gr.Gallery(
+        label="Recent Videos",
+        value=get_video_history(),
+        columns=5, height=120, allow_preview=False,
+    )
+
+    with gr.Accordion("Settings", open=False):
+        _key, _status = load_settings()
+        settings_key = gr.Textbox(
+            label="ElevenLabs API Key (optional — Kokoro is free)",
+            type="password", value=_key,
+        )
+        settings_status = gr.Markdown(_status)
+        save_settings_btn = gr.Button("Save Settings", size="sm")
+
+    # ── Event wiring ─────────────────────────────────────────────────────────
+    avatar_upload.change(
+        fn=save_uploaded_avatar,
+        inputs=[avatar_upload],
+        outputs=[avatar_upload, avatar_status, avatar_gallery],
+    )
+    avatar_gallery.select(
+        fn=select_avatar_from_gallery,
+        inputs=None,
+        outputs=[avatar_upload, avatar_status],
+    )
+    script_box.change(
+        fn=update_char_count,
+        inputs=[script_box], outputs=[char_counter],
+    )
+    voice_dropdown.change(
+        fn=generate_voice_preview,
+        inputs=[voice_dropdown], outputs=[voice_preview],
+    )
+    generate_btn.click(
+        fn=generate_video,
+        inputs=[
+            script_box, voice_dropdown, orientation_radio, music_slider,
+            background_upload, use_latentsync_cb, enhance_face_cb,
+            add_captions_cb, preview_mode_cb, caption_fontsize, caption_position,
+        ],
+        outputs=[output_video, log_box, metadata_html, video_history],
+    )
+    cancel_btn.click(fn=cancel_generation, outputs=[log_box])
+    open_folder_btn.click(fn=open_output_folder, outputs=[folder_status])
+    save_settings_btn.click(
+        fn=save_settings,
+        inputs=[settings_key], outputs=[settings_status],
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Stand-alone launch
+# ═══════════════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    demo.launch(
+        server_name="127.0.0.1",
+        server_port=7860,
+        inbrowser=True,
+        share=False,
+        show_error=True,
+        theme=gr.themes.Soft(),
+        css=CSS,
+        favicon_path=str(ASSETS_DIR / "favicon.png"),
+    )

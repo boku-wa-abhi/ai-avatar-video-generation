@@ -8,8 +8,8 @@ elevenlabs_key: ""
 musetalk_dir: "~/MuseTalk"
 comfyui_dir: "~/ComfyUI"
 
-# Default avatar image (relative to pipeline root)
-avatar_path: "avatar/avatar.png"
+# Default avatar image (relative to project root)
+avatar_path: "data/avatars/avatar.png"
 
 # Video defaults
 default_fps: 25
