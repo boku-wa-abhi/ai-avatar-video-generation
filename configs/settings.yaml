@@ -20,3 +20,17 @@ output_resolution:
   "9:16": "1080x1920"
   "16:9": "1920x1080"
   "1:1": "1080x1080"
+
+# LatentSync 1.6 settings
+latentsync:
+  inference_steps: 25
+  lips_expression: 1.5
+  input_fps: 25
+  face_resolution: 512
+
+# Local TTS settings (Kokoro — hexgrad/Kokoro-82M)
+tts:
+  engine: "kokoro"
+  default_voice: "af_heart"   # American female, high quality
+  speed: 1.0
+  lang_code: "a"              # 'a'=American English, 'b'=British English

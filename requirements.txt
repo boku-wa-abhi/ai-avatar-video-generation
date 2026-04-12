@@ -2,7 +2,9 @@
 # Install with: uv pip install -r requirements.txt
 # Requires Python 3.10, run inside ~/MuseTalk/musetalk-env
 
-elevenlabs>=1.0.0
+# Local TTS — Kokoro (hexgrad/Kokoro-82M, MIT license, real-time on Apple Silicon)
+# System dep required: brew install espeak-ng
+kokoro>=0.9.4
 faster-whisper>=1.0.0
 pyyaml
 pillow

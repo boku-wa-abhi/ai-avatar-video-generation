@@ -19,21 +19,31 @@ fail() { echo -e "${RED}[FAIL]${NC} $*"; }
 COMFYUI_DIR="$HOME/ComfyUI"
 WRAPPER_DIR="$COMFYUI_DIR/custom_nodes/ComfyUI-LatentSyncWrapper"
 CHECKPOINTS="$WRAPPER_DIR/checkpoints"
+# Use the single pipeline venv — it already has torch/numpy/diffusers
+PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PIPELINE_VENV="$PIPELINE_DIR/.venv"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pre-flight checks
+# Pre-flight: create ComfyUI directory structure if it doesn't exist.
+# Full ComfyUI is NOT required — we only need the folder tree.
 # ─────────────────────────────────────────────────────────────────────────────
-if [ ! -d "$COMFYUI_DIR" ]; then
-    fail "ComfyUI not found at $COMFYUI_DIR. Install ComfyUI first."
+mkdir -p "$COMFYUI_DIR/custom_nodes"
+if [ ! -d "$COMFYUI_DIR/.git" ]; then
+    log "Using $COMFYUI_DIR as standalone LatentSync workspace (no full ComfyUI needed)"
+fi
+
+if [ ! -f "$PIPELINE_VENV/bin/activate" ]; then
+    fail "Pipeline venv not found at $PIPELINE_VENV. Run setup.sh first."
     exit 1
 fi
+# shellcheck source=/dev/null
+source "$PIPELINE_VENV/bin/activate"
+log "Using pipeline venv: $PIPELINE_VENV (Python: $(python --version))"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Step A — Clone & install ComfyUI-LatentSyncWrapper
 # ─────────────────────────────────────────────────────────────────────────────
 log "Step A — Installing ComfyUI-LatentSyncWrapper..."
-
-mkdir -p "$COMFYUI_DIR/custom_nodes"
 
 if [ -d "$WRAPPER_DIR/.git" ]; then
     log "  Already cloned at $WRAPPER_DIR"
@@ -48,38 +58,109 @@ fi
 
 cd "$WRAPPER_DIR"
 
-# Activate a venv for LatentSync deps. Use ComfyUI's venv if it exists,
-# otherwise create one inside the wrapper dir.
-if [ -f "$COMFYUI_DIR/.venv/bin/activate" ]; then
-    log "  Using ComfyUI venv: $COMFYUI_DIR/.venv"
-    # shellcheck source=/dev/null
-    source "$COMFYUI_DIR/.venv/bin/activate"
-elif [ -f "$COMFYUI_DIR/venv/bin/activate" ]; then
-    log "  Using ComfyUI venv: $COMFYUI_DIR/venv"
-    # shellcheck source=/dev/null
-    source "$COMFYUI_DIR/venv/bin/activate"
-else
-    warn "  No ComfyUI venv found — creating one in $WRAPPER_DIR/.venv"
-    uv venv --python 3.10 "$WRAPPER_DIR/.venv"
-    # shellcheck source=/dev/null
-    source "$WRAPPER_DIR/.venv/bin/activate"
-fi
+# Pipeline venv already activated above — no separate venv needed.
+export PYTORCH_ENABLE_MPS_FALLBACK=1
+export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
+log "  Venv: $PIPELINE_VENV"
 
 # Inject MPS env vars
 export PYTORCH_ENABLE_MPS_FALLBACK=1
 export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
 
 if [ -f "$WRAPPER_DIR/requirements.txt" ]; then
-    log "  Installing requirements.txt..."
-    pip install -r "$WRAPPER_DIR/requirements.txt"
+    log "  Installing requirements (excluding decord — built from source next)..."
+    # decord has no macOS ARM64 wheel on PyPI — handled separately below
+    grep -v "^decord" "$WRAPPER_DIR/requirements.txt" > /tmp/latentsync_reqs_no_decord.txt
+    pip install -r /tmp/latentsync_reqs_no_decord.txt
 else
     warn "  No requirements.txt found — installing known deps..."
-    pip install diffusers transformers mediapipe face-alignment decord \
-                soundfile einops omegaconf accelerate
+    pip install diffusers transformers mediapipe face-alignment \
+                soundfile einops omegaconf accelerate opencv-python
 fi
 
-# Also ensure huggingface-cli is available for model downloads
-pip install huggingface_hub 2>/dev/null
+# --- decord compatibility shim using cv2 (no ARM64 wheel, source incompatible with FFmpeg 6.x) ---
+log "  Installing decord cv2-shim for Apple Silicon..."
+cat > "$WRAPPER_DIR/decord.py" << 'PYEOF'
+"""
+decord compatibility shim for Apple Silicon / macOS.
+Implements VideoReader, NDArray, cpu, and gpu using OpenCV.
+Drop-in replacement for the decord package where LatentSync uses it.
+"""
+import numpy as np
+import cv2
+
+
+class NDArray:
+    """Minimal decord NDArray wrapper."""
+    def __init__(self, arr: np.ndarray):
+        self._arr = arr
+
+    def asnumpy(self) -> np.ndarray:
+        return self._arr
+
+    def __len__(self):
+        return len(self._arr)
+
+    def __getitem__(self, key):
+        return NDArray(self._arr[key])
+
+    @property
+    def shape(self):
+        return self._arr.shape
+
+
+class VideoReader:
+    """decord.VideoReader drop-in backed by OpenCV."""
+
+    def __init__(self, path: str, ctx=None, num_threads: int = 1,
+                 width: int = -1, height: int = -1):
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            raise IOError(f"Cannot open video: {path}")
+        self._fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        self._frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            self._frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        cap.release()
+
+    def __len__(self) -> int:
+        return len(self._frames)
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return NDArray(np.array(self._frames[idx]))
+        if isinstance(idx, (list, np.ndarray)):
+            return NDArray(np.array([self._frames[i] for i in idx]))
+        return NDArray(np.array(self._frames[idx]))
+
+    def get_avg_fps(self) -> float:
+        return self._fps
+
+    def get_batch(self, indices) -> NDArray:
+        return NDArray(np.array([self._frames[i] for i in indices]))
+
+
+class cpu:  # noqa: N801
+    """Mimics decord.cpu(ctx_id)."""
+    def __init__(self, ctx_id: int = 0):
+        pass
+
+
+class gpu:  # noqa: N801
+    """Mimics decord.gpu(ctx_id) — falls back to cpu on MPS machines."""
+    def __init__(self, ctx_id: int = 0):
+        pass
+PYEOF
+log "  decord shim written to $WRAPPER_DIR/decord.py ✓"
+python -c "
+import sys
+sys.path.insert(0, '$WRAPPER_DIR')
+import decord
+print('  decord shim import OK')
+"
 
 log "Step A — LatentSyncWrapper installed"
 
@@ -143,62 +224,94 @@ log "Step C — Downloading model weights..."
 
 mkdir -p "$CHECKPOINTS/vae" "$CHECKPOINTS/whisper"
 
-# Check HuggingFace login
-if ! huggingface-cli whoami &>/dev/null; then
+# huggingface-cli was deprecated in favour of 'hf' — use Python SDK as fallback
+HF_CLI=""
+if command -v hf &>/dev/null; then
+    HF_CLI="hf download"
+elif command -v huggingface-cli &>/dev/null; then
+    HF_CLI="huggingface-cli download"
+else
+    # Install via pip if neither is available
+    pip install -q "huggingface_hub[cli]" 2>/dev/null
+    HF_CLI="huggingface-cli download"
+fi
+
+# Check HuggingFace login state
+HF_WHOAMI=$(python -c "from huggingface_hub import whoami; print(whoami()['name'])" 2>/dev/null || true)
+if [ -z "$HF_WHOAMI" ]; then
     warn "  Not logged into HuggingFace!"
     warn "  LatentSync-1.6 is a gated model. You must:"
     warn "    1. Accept the license at https://huggingface.co/ByteDance/LatentSync-1.6"
-    warn "    2. Run: huggingface-cli login"
-    warn "  Skipping gated model download — you can re-run this script after login."
+    warn "    2. Run: hf auth login  (or: huggingface-cli login)"
+    warn "  Skipping gated model download — re-run this script after login."
     SKIP_GATED=true
 else
     SKIP_GATED=false
-    HF_USER=$(huggingface-cli whoami 2>/dev/null | head -1)
-    log "  Logged in as: $HF_USER"
+    log "  Logged in as: $HF_WHOAMI"
 fi
 
 # --- Main LatentSync models (gated) ---
 if [ "$SKIP_GATED" = false ]; then
     log "  Downloading LatentSync-1.6 main models..."
-    huggingface-cli download ByteDance/LatentSync-1.6 \
-        latentsync_unet.pt stable_syncnet.pt config.json \
-        --local-dir "$CHECKPOINTS/" || {
-        warn "  Failed to download LatentSync models. Check HF login and license."
-    }
+    python -c "
+from huggingface_hub import hf_hub_download
+import os
+for f in ['latentsync_unet.pt', 'stable_syncnet.pt', 'config.json']:
+    out = os.path.join('$CHECKPOINTS', f)
+    if not os.path.exists(out):
+        print(f'  Downloading {f}...')
+        hf_hub_download('ByteDance/LatentSync-1.6', filename=f, local_dir='$CHECKPOINTS')
+    else:
+        print(f'  Already exists: {f}')
+" || warn "  Failed to download LatentSync models. Check HF login and license."
 fi
 
 # --- SD-VAE-FT-MSE ---
 log "  Downloading SD-VAE-FT-MSE..."
-huggingface-cli download stabilityai/sd-vae-ft-mse \
-    diffusion_pytorch_model.safetensors config.json \
-    --local-dir "$CHECKPOINTS/vae/" || {
-    warn "  Failed to download SD-VAE."
-}
+python -c "
+from huggingface_hub import hf_hub_download
+import os
+for f in ['diffusion_pytorch_model.safetensors', 'config.json']:
+    out = os.path.join('$CHECKPOINTS/vae', f)
+    if not os.path.exists(out):
+        print(f'  Downloading {f}...')
+        hf_hub_download('stabilityai/sd-vae-ft-mse', filename=f, local_dir='$CHECKPOINTS/vae')
+    else:
+        print(f'  Already exists: {f}')
+" || warn "  Failed to download SD-VAE."
 
 # --- Whisper tiny ---
 log "  Downloading Whisper tiny..."
-huggingface-cli download openai/whisper-tiny \
-    --include "*.pt" \
-    --local-dir "$CHECKPOINTS/whisper/" || {
-    warn "  Failed to download Whisper tiny."
-}
+python -c "
+from huggingface_hub import hf_hub_download, list_repo_files
+import os
+for f in list_repo_files('openai/whisper-tiny'):
+    if f.endswith('.pt'):
+        out = os.path.join('$CHECKPOINTS/whisper', f)
+        if not os.path.exists(out):
+            print(f'  Downloading {f}...')
+            hf_hub_download('openai/whisper-tiny', filename=f, local_dir='$CHECKPOINTS/whisper')
+        else:
+            print(f'  Already exists: {f}')
+" || warn "  Failed to download Whisper tiny."
 
-# Verify model files
+# Verify model files (plain array — no associative arrays for portability)
 log "  Verifying model files..."
-declare -A MODEL_FILES=(
-    ["latentsync_unet.pt"]="$CHECKPOINTS/latentsync_unet.pt"
-    ["stable_syncnet.pt"]="$CHECKPOINTS/stable_syncnet.pt"
-    ["config.json"]="$CHECKPOINTS/config.json"
-    ["vae/diffusion_pytorch_model.safetensors"]="$CHECKPOINTS/vae/diffusion_pytorch_model.safetensors"
+MODEL_FILES=(
+    "$CHECKPOINTS/latentsync_unet.pt:latentsync_unet.pt"
+    "$CHECKPOINTS/stable_syncnet.pt:stable_syncnet.pt"
+    "$CHECKPOINTS/config.json:config.json"
+    "$CHECKPOINTS/vae/diffusion_pytorch_model.safetensors:vae/diffusion_pytorch_model.safetensors"
 )
 
-for name in "${!MODEL_FILES[@]}"; do
-    fpath="${MODEL_FILES[$name]}"
+for entry in "${MODEL_FILES[@]}"; do
+    fpath="${entry%%:*}"
+    name="${entry##*:}"
     if [ -f "$fpath" ]; then
         SIZE=$(du -sh "$fpath" | cut -f1)
         log "  PASS — $name ($SIZE)"
     else
-        fail "  FAIL — $name NOT FOUND"
+        warn "  MISSING — $name (download separately if needed)"
     fi
 done
 
