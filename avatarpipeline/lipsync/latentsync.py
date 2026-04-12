@@ -198,15 +198,57 @@ class LatentSyncInference:
         mask_path = self.wrapper_dir / "latentsync" / "utils" / "mask.png"
 
         runner_script = f"""\
-import sys, os
+import sys, os, ssl, math
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+
+# Fix macOS Python SSL cert issue so whisper model download works
+try:
+    import certifi
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+except ImportError:
+    pass
+if not os.environ.get("SSL_CERT_FILE"):
+    ssl._create_default_https_context = ssl._create_unverified_context
 
 wrapper_dir = {repr(str(self.wrapper_dir))}
 sys.path.insert(0, wrapper_dir)
 
-from omegaconf import OmegaConf
 import torch
+import torch.nn.functional as F
+
+# --- Chunked SDPA for MPS: avoids >16 GiB Metal buffer allocation ----------
+_orig_sdpa = F.scaled_dot_product_attention
+
+def _chunked_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None):
+    \"\"\"Fall back to chunked attention when the MPS buffer would exceed Metal limits.\"\"\"
+    if not query.is_mps:
+        return _orig_sdpa(query, key, value, attn_mask=attn_mask,
+                          dropout_p=dropout_p, is_causal=is_causal, scale=scale)
+    # Estimate attention-matrix bytes: batch * heads * seq * seq * 4
+    b, h, s, d = query.shape
+    attn_bytes = b * h * s * s * 4
+    METAL_MAX = 8 * 1024**3  # conservative 8 GiB limit
+    if attn_bytes <= METAL_MAX:
+        return _orig_sdpa(query, key, value, attn_mask=attn_mask,
+                          dropout_p=dropout_p, is_causal=is_causal, scale=scale)
+    # Process in batch-chunks small enough for Metal
+    max_batch = max(1, int(METAL_MAX / (h * s * s * 4)))
+    outs = []
+    for i in range(0, b, max_batch):
+        q_c = query[i:i+max_batch]
+        k_c = key[i:i+max_batch]
+        v_c = value[i:i+max_batch]
+        m_c = attn_mask[i:i+max_batch] if attn_mask is not None else None
+        outs.append(_orig_sdpa(q_c, k_c, v_c, attn_mask=m_c,
+                               dropout_p=dropout_p, is_causal=is_causal, scale=scale))
+    return torch.cat(outs, dim=0)
+
+F.scaled_dot_product_attention = _chunked_sdpa
+print("Chunked SDPA patch applied for MPS")
+# ---------------------------------------------------------------------------
+
+from omegaconf import OmegaConf
 from diffusers import AutoencoderKL, DDIMScheduler
 from latentsync.models.unet import UNet3DConditionModel
 from latentsync.pipelines.lipsync_pipeline import LipsyncPipeline
@@ -261,14 +303,8 @@ pipeline = LipsyncPipeline(
     vae=vae, audio_encoder=audio_encoder, unet=unet, scheduler=scheduler,
 ).to(device)
 
-try:
-    from DeepCache import DeepCacheSDHelper
-    helper = DeepCacheSDHelper(pipe=pipeline)
-    helper.set_params(cache_interval=3, cache_branch_id=0)
-    helper.enable()
-    print("DeepCache enabled")
-except ImportError:
-    print("DeepCache not available")
+# Skip DeepCache — it doubles memory pressure and conflicts with MPS chunking
+print("DeepCache skipped (MPS memory optimisation)")
 
 torch.manual_seed(1247)
 print("Running inference...")
