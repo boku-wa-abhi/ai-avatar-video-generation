@@ -238,7 +238,7 @@ def generate_video(
     orientation: str,
     music_volume: float,
     background_file: str | None,
-    use_latentsync: bool,
+    lipsync_engine: str,
     enhance_face: bool,
     add_captions: bool,
     preview_mode: bool,
@@ -345,25 +345,28 @@ def generate_video(
             return
 
         step = 3
-        # NOTE: LatentSync 1.6 requires CUDA GPU. Using MuseTalk for MPS/CPU.
-        # To re-enable LatentSync on a CUDA system, uncomment the if/else block below.
-        engine = "MuseTalk 1.5"
-        log(f"STEP {step}/{TOTAL}: Running {engine} lip-sync...")
-        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Lip-sync ({engine})")
+        engine_map = {
+            "MuseTalk 1.5 (default)": "musetalk",
+            "SadTalker (256 px)": "sadtalker",
+            "SadTalker HD (512 px + GFPGAN)": "sadtalker_hd",
+        }
+        engine_key = engine_map.get(lipsync_engine, "musetalk")
+        log(f"STEP {step}/{TOTAL}: Running {lipsync_engine} lip-sync...")
+        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Lip-sync ({lipsync_engine})")
         yield None, current_log(), "", get_video_history()
 
         t0 = time.time()
         lipsync_mp4 = str(OUTPUT_DIR / f"lipsync_{run_id}.mp4")
 
-        # if use_latentsync:  # CUDA only
-        #     from avatarpipeline.lipsync.latentsync import LatentSyncInference
-        #     ls = LatentSyncInference()
-        #     lipsync_mp4 = ls.run(str(avatar_png), speech_16k, output_path=lipsync_mp4)
-        # else:
-        from avatarpipeline.lipsync.musetalk import MuseTalkInference
-        ms = MuseTalkInference()
-        ms.prepare_avatar(str(avatar_png))
-        lipsync_mp4 = ms.run(str(avatar_png), speech_16k)
+        if engine_key in ("sadtalker", "sadtalker_hd"):
+            from avatarpipeline.lipsync.sadtalker import SadTalkerInference
+            st = SadTalkerInference(preset=engine_key)
+            lipsync_mp4 = st.run(str(avatar_png), speech_16k, output_path=lipsync_mp4)
+        else:
+            from avatarpipeline.lipsync.musetalk import MuseTalkInference
+            ms = MuseTalkInference()
+            ms.prepare_avatar(str(avatar_png))
+            lipsync_mp4 = ms.run(str(avatar_png), speech_16k)
 
         em, es = divmod(int(time.time() - t0), 60)
         log(f"STEP {step}/{TOTAL}: ✅ Lip-sync complete ({em}m {es}s)")
@@ -706,11 +709,16 @@ with gr.Blocks(title="Avatar Studio") as demo:
                 )
 
             with gr.Accordion("Advanced Options", open=False):
+                lipsync_radio = gr.Radio(
+                    label="Lip-sync Engine",
+                    choices=[
+                        "MuseTalk 1.5 (default)",
+                        "SadTalker (256 px)",
+                        "SadTalker HD (512 px + GFPGAN)",
+                    ],
+                    value="MuseTalk 1.5 (default)",
+                )
                 with gr.Row():
-                    use_latentsync_cb = gr.Checkbox(
-                        label="LatentSync 1.6 (CUDA only — ignored on MPS)", value=False,
-                        interactive=False,
-                    )
                     enhance_face_cb = gr.Checkbox(
                         label="CodeFormer face enhancement", value=True
                     )
@@ -798,7 +806,7 @@ with gr.Blocks(title="Avatar Studio") as demo:
         fn=generate_video,
         inputs=[
             script_box, voice_dropdown, orientation_radio, music_slider,
-            background_upload, use_latentsync_cb, enhance_face_cb,
+            background_upload, lipsync_radio, enhance_face_cb,
             add_captions_cb, preview_mode_cb, caption_fontsize, caption_position,
         ],
         outputs=[output_video, log_box, metadata_html, video_history],

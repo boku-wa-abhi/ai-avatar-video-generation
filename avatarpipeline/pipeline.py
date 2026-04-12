@@ -46,7 +46,7 @@ def run_pipeline(
     music_path: str | None = None,
     include_captions: bool = True,
     include_enhance: bool = True,
-    use_musetalk: bool = False,
+    lipsync_engine: str = "musetalk",
     preview: bool = False,
 ) -> str:
     """Execute the full video generation pipeline.
@@ -60,15 +60,12 @@ def run_pipeline(
         music_path:       Optional background music file.
         include_captions: Burn auto-generated subtitles into the output.
         include_enhance:  Run face restoration (CodeFormer / GFPGAN).
-        use_musetalk:     Use MuseTalk 1.5 instead of LatentSync 1.6.
+        lipsync_engine:   "musetalk" | "sadtalker" | "sadtalker_hd".
         preview:          Open the output in the default media player when done.
 
     Returns:
         Absolute path to the final MP4.
     """
-    # NOTE: LatentSync requires CUDA — commented out for MPS/CPU systems.
-    # from avatarpipeline.lipsync.latentsync import LatentSyncInference
-    from avatarpipeline.lipsync.musetalk import MuseTalkInference
     from avatarpipeline.postprocess.assembler import VideoAssembler
     from avatarpipeline.postprocess.captions import CaptionGenerator
     from avatarpipeline.postprocess.enhancer import FaceEnhancer
@@ -112,21 +109,18 @@ def run_pipeline(
     logger.info(f"   Resample done in {_elapsed(t)}")
 
     # ── Step 3: Lip-sync ────────────────────────────────────────────────────
-    # NOTE: LatentSync 1.6 requires CUDA GPU. Uncomment the else branch below
-    # if running on a CUDA system for higher-quality lip-sync.
-    #
-    # if not use_musetalk:
-    #     _step(3, TOTAL, "Lip-sync — LatentSync 1.6")
-    #     t = time.time()
-    #     from avatarpipeline.lipsync.latentsync import LatentSyncInference
-    #     ls = LatentSyncInference()
-    #     lipsync_mp4 = ls.run(str(avatar_png), speech_16k, output_path=lipsync_mp4)
-    # else:
-    _step(3, TOTAL, "Lip-sync — MuseTalk 1.5")
+    _step(3, TOTAL, f"Lip-sync — {lipsync_engine}")
     t = time.time()
-    ms = MuseTalkInference()
-    ms.prepare_avatar(str(avatar_png))
-    lipsync_mp4 = ms.run(str(avatar_png), speech_16k)
+
+    if lipsync_engine in ("sadtalker", "sadtalker_hd"):
+        from avatarpipeline.lipsync.sadtalker import SadTalkerInference
+        st = SadTalkerInference(preset=lipsync_engine)
+        lipsync_mp4 = st.run(str(avatar_png), speech_16k, output_path=lipsync_mp4)
+    else:
+        from avatarpipeline.lipsync.musetalk import MuseTalkInference
+        ms = MuseTalkInference()
+        ms.prepare_avatar(str(avatar_png))
+        lipsync_mp4 = ms.run(str(avatar_png), speech_16k)
 
     logger.info(f"   Lip-sync done in {_elapsed(t)}")
 

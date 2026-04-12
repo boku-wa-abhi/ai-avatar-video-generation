@@ -52,7 +52,7 @@ def test_config_loads():
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
     assert "default_fps" in cfg
-    assert "latentsync" in cfg
+    assert "lipsync" in cfg
     assert "tts" in cfg
     assert cfg["tts"]["engine"] == "kokoro"
     assert "data/avatars" in cfg["avatar_path"]
@@ -212,34 +212,24 @@ def test_face_enhancer_passthrough():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. LatentSync inference (structure only — full inference takes minutes)
+# 6. SadTalker inference (structure only — full inference takes minutes)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_latentsync_init():
-    """LatentSyncInference loads config and finds wrapper directory."""
-    from avatarpipeline.lipsync.latentsync import LatentSyncInference
-    ls = LatentSyncInference()
-    assert ls.wrapper_dir.exists()
-    assert ls.checkpoints_dir.exists()
-    assert ls.inference_steps > 0
+def test_sadtalker_init():
+    """SadTalkerInference loads config and finds SadTalker directory."""
+    from avatarpipeline.lipsync.sadtalker import SadTalkerInference
+    st = SadTalkerInference(preset="sadtalker")
+    assert st.sadtalker_dir.exists()
+    assert st.venv_python.exists()
+    assert st.preset["size"] == 256
 
 
-def test_latentsync_prepare_video():
-    """prepare_input_video creates a valid looped MP4 from a PNG."""
-    from avatarpipeline.lipsync.latentsync import LatentSyncInference
-
-    ls = LatentSyncInference()
-    if not AVATAR_PNG.exists():
-        pytest.skip("No avatar.png available")
-
-    result = ls.prepare_input_video(str(AVATAR_PNG), duration_secs=2.0, fps=25)
-    assert Path(result).exists()
-    r = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", result],
-        capture_output=True, text=True,
-    )
-    assert float(r.stdout.strip()) >= 1.5
+def test_sadtalker_hd_init():
+    """SadTalkerInference HD preset uses 512 px and GFPGAN."""
+    from avatarpipeline.lipsync.sadtalker import SadTalkerInference
+    st = SadTalkerInference(preset="sadtalker_hd")
+    assert st.preset["size"] == 512
+    assert st.preset["enhancer"] == "gfpgan"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ elevenlabs_key: ""
 
 # Model directories
 musetalk_dir: "~/MuseTalk"
-comfyui_dir: "~/ComfyUI"
+sadtalker_dir: "~/SadTalker"
 
 # Default avatar image (relative to project root)
 avatar_path: "data/avatars/avatar.png"
@@ -21,12 +21,10 @@ output_resolution:
   "16:9": "1920x1080"
   "1:1": "1080x1080"
 
-# LatentSync 1.6 settings
-latentsync:
-  inference_steps: 25
-  lips_expression: 1.5
-  input_fps: 25
-  face_resolution: 512
+# Lip-sync engine settings
+lipsync:
+  default_engine: "musetalk"        # musetalk | sadtalker | sadtalker_hd
+  expression_scale: 1.0              # SadTalker expression intensity (0.0–3.0)
 
 # Local TTS settings (Kokoro — hexgrad/Kokoro-82M)
 tts:

@@ -18,7 +18,7 @@ Audio WAV (24 kHz)
     ▼  Step 2 — Resample
 Audio WAV (16 kHz mono)
     │
-    ▼  Step 3 — Lip-sync (LatentSync 1.6 or MuseTalk 1.5)
+    ▼  Step 3 — Lip-sync (MuseTalk 1.5 / SadTalker / SadTalker HD)
 Raw lip-synced MP4
     │
     ▼  Step 4 — Face Enhancement (CodeFormer / GFPGAN / passthrough)
@@ -39,8 +39,8 @@ Deliverable MP4
 | Step | Model | Size | License |
 |------|-------|------|---------|
 | TTS | Kokoro-82M | ~330 MB | MIT |
-| Lip-sync (default) | LatentSync 1.6 | ~7 GB | Apache 2.0 |
-| Lip-sync (alt) | MuseTalk 1.5 | ~3 GB | Apache 2.0 |
+| Lip-sync (default) | MuseTalk 1.5 | ~3 GB | Apache 2.0 |
+| Lip-sync (alt) | SadTalker | ~1.7 GB | MIT |
 | Captions | faster-whisper (large-v3) | ~3 GB | MIT |
 | Face enhancement | CodeFormer / GFPGAN | optional | — |
 
@@ -57,8 +57,8 @@ ai-avatar-video-generation/
 │   ├── voice/
 │   │   └── kokoro.py         # VoiceGenerator — Kokoro TTS
 │   ├── lipsync/
-│   │   ├── latentsync.py     # LatentSyncInference — lip-sync (default)
-│   │   └── musetalk.py       # MuseTalkInference   — lip-sync (alt)
+│   │   ├── musetalk.py       # MuseTalkInference  — lip-sync (default)
+│   │   └── sadtalker.py      # SadTalkerInference — lip-sync (alt)
 │   └── postprocess/
 │       ├── enhancer.py       # FaceEnhancer — CodeFormer / GFPGAN
 │       ├── captions.py       # CaptionGenerator — faster-whisper
@@ -74,7 +74,7 @@ ai-avatar-video-generation/
 │
 ├── install/
 │   ├── setup.sh              # Phase 1: system deps, Python venv, MuseTalk
-│   └── install_latentsync.sh # Phase 2: LatentSync + ComfyUI wrapper
+│   └── install_sadtalker.sh  # Phase 2: SadTalker + MPS patches
 │
 ├── configs/
 │   └── settings.yaml         # All pipeline settings
@@ -117,13 +117,16 @@ bash install/setup.sh
 
 Creates `.venv/` with Python 3.10 and all Python dependencies.
 
-### 3. Install LatentSync (lip-sync model)
+### 3. Install SadTalker (optional lip-sync model)
+
+SadTalker is already installed at `~/SadTalker` with its own venv.
+To reinstall:
 
 ```bash
-bash install/install_latentsync.sh
+git clone https://github.com/OpenTalker/SadTalker.git ~/SadTalker
+cd ~/SadTalker && uv venv sadtalker-env --python 3.10
+bash scripts/download_models.sh
 ```
-
-Clones ComfyUI-LatentSyncWrapper and downloads LatentSync 1.6 checkpoints (~7 GB).
 
 ### 4. Add your avatar
 

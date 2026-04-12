@@ -5,8 +5,8 @@ Public API surface:
 
     from avatarpipeline.pipeline import run_pipeline
     from avatarpipeline.voice.kokoro import VoiceGenerator
-    from avatarpipeline.lipsync.latentsync import LatentSyncInference
     from avatarpipeline.lipsync.musetalk import MuseTalkInference
+    from avatarpipeline.lipsync.sadtalker import SadTalkerInference
     from avatarpipeline.postprocess.enhancer import FaceEnhancer
     from avatarpipeline.postprocess.captions import CaptionGenerator
     from avatarpipeline.postprocess.assembler import VideoAssembler

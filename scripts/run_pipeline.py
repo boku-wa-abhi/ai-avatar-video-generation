@@ -59,8 +59,9 @@ Examples:
                    help="Open result in default media player when done")
     p.add_argument("--no-captions", action="store_true", help="Skip subtitle generation")
     p.add_argument("--no-enhance", action="store_true", help="Skip face enhancement")
-    p.add_argument("--musetalk", action="store_true",
-                   help="Use MuseTalk 1.5 instead of LatentSync 1.6")
+    p.add_argument("--engine", default="musetalk",
+                   choices=["musetalk", "sadtalker", "sadtalker_hd"],
+                   help="Lip-sync engine [default: musetalk]")
     p.add_argument("--list-voices", action="store_true", help="List available voices and exit")
     return p.parse_args()
 
@@ -93,7 +94,7 @@ def main() -> None:
             music_path=args.music,
             include_captions=not args.no_captions,
             include_enhance=not args.no_enhance,
-            use_musetalk=args.musetalk,
+            lipsync_engine=args.engine,
             preview=args.preview,
         )
     except KeyboardInterrupt:
