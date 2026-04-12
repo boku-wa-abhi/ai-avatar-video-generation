@@ -1,0 +1,22 @@
+# Avatar Pipeline — Global Settings
+# ==================================
+
+# ElevenLabs API key (read from env var ELEVENLABS_KEY if empty)
+elevenlabs_key: ""
+
+# Model directories
+musetalk_dir: "~/MuseTalk"
+comfyui_dir: "~/ComfyUI"
+
+# Default avatar image (relative to pipeline root)
+avatar_path: "avatar/avatar.png"
+
+# Video defaults
+default_fps: 25
+default_orientation: "9:16"
+
+# Output resolutions by orientation
+output_resolution:
+  "9:16": "1080x1920"
+  "16:9": "1920x1080"
+  "1:1": "1080x1080"
