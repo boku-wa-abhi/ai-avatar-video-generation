@@ -152,10 +152,10 @@ class SadTalkerInference:
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=900,
+                timeout=1800,
             )
         except subprocess.TimeoutExpired:
-            raise RuntimeError("SadTalker inference timed out after 900 seconds.")
+            raise RuntimeError("SadTalker inference timed out after 1800 seconds.")
 
         if result.returncode != 0:
             logger.error(f"SadTalker STDOUT:\n{result.stdout}")
