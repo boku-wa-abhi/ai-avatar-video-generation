@@ -170,26 +170,25 @@ import sys, os
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 
-sys.path.insert(0, "{self.wrapper_dir}")
+sys.path.insert(0, {repr(str(self.wrapper_dir))})
 
 import torch
-from latentsync.utils.util import load_video_frames
 from latentsync.pipelines.lipsync_pipeline import LipsyncPipeline
 
 device = "mps"
 
 # Load pipeline
 pipe = LipsyncPipeline.from_pretrained(
-    pretrained_model_name_or_path="{self.checkpoints_dir}",
+    pretrained_model_name_or_path={repr(str(self.checkpoints_dir))},
     device=device,
 )
 pipe = pipe.to(device)
 
 # Run inference
 output = pipe(
-    video_path="{loop_video}",
-    audio_path="{audio_wav}",
-    video_out_path="{out.resolve()}",
+    video_path={repr(str(loop_video))},
+    audio_path={repr(str(audio_wav))},
+    video_out_path={repr(str(out.resolve()))},
     num_inference_steps={steps},
     guidance_scale={lips},
 )

@@ -16,8 +16,17 @@ log()  { echo -e "${GREEN}[SETUP]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 fail() { echo -e "${RED}[FAIL]${NC} $*"; }
 
-# Pipeline dir = the directory containing this script (works from any cwd)
-PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Load .env if present
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -o allexport
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/.env"
+    set +o allexport
+    log "Loaded .env"
+fi
+
+PIPELINE_DIR="$SCRIPT_DIR"
 MUSETALK_DIR="$HOME/MuseTalk"
 VENV_DIR="$MUSETALK_DIR/musetalk-env"
 PIPELINE_VENV="$PIPELINE_DIR/.venv"

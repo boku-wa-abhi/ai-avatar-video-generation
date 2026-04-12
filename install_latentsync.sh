@@ -16,6 +16,32 @@ log()  { echo -e "${GREEN}[LATENTSYNC]${NC} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 fail() { echo -e "${RED}[FAIL]${NC} $*"; }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Load .env file (HF_TOKEN, ELEVENLABS_KEY, etc.)
+# ─────────────────────────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+    # Export non-comment, non-empty lines
+    set -o allexport
+    # shellcheck source=/dev/null
+    source "$ENV_FILE"
+    set +o allexport
+    log "Loaded .env from $ENV_FILE"
+else
+    warn ".env not found — HF_TOKEN must be set as an environment variable"
+fi
+
+# Validate HF_TOKEN
+if [ -z "${HF_TOKEN:-}" ]; then
+    warn "HF_TOKEN is not set — gated model downloads will be skipped."
+    warn "Add HF_TOKEN=<your_token> to .env and re-run."
+else
+    log "HF_TOKEN loaded (${#HF_TOKEN} chars)"
+    export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"   # legacy env var
+    export HF_TOKEN                               # new env var
+fi
+
 COMFYUI_DIR="$HOME/ComfyUI"
 WRAPPER_DIR="$COMFYUI_DIR/custom_nodes/ComfyUI-LatentSyncWrapper"
 CHECKPOINTS="$WRAPPER_DIR/checkpoints"
@@ -236,14 +262,23 @@ else
     HF_CLI="huggingface-cli download"
 fi
 
-# Check HuggingFace login state
-HF_WHOAMI=$(python -c "from huggingface_hub import whoami; print(whoami()['name'])" 2>/dev/null || true)
+# Check HuggingFace login state via token
+HF_WHOAMI=$(python -c "
+from huggingface_hub import whoami
+import os, sys
+token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')
+try:
+    user = whoami(token=token)
+    print(user['name'])
+except Exception as e:
+    sys.exit(1)
+" 2>/dev/null || true)
+
 if [ -z "$HF_WHOAMI" ]; then
-    warn "  Not logged into HuggingFace!"
-    warn "  LatentSync-1.6 is a gated model. You must:"
-    warn "    1. Accept the license at https://huggingface.co/ByteDance/LatentSync-1.6"
-    warn "    2. Run: hf auth login  (or: huggingface-cli login)"
-    warn "  Skipping gated model download — re-run this script after login."
+    warn "  HuggingFace auth failed."
+    warn "  LatentSync-1.6 is a gated model — you must:"
+    warn "    1. Accept license at https://huggingface.co/ByteDance/LatentSync-1.6"
+    warn "    2. Set HF_TOKEN in .env and re-run."
     SKIP_GATED=true
 else
     SKIP_GATED=false
@@ -254,28 +289,32 @@ fi
 if [ "$SKIP_GATED" = false ]; then
     log "  Downloading LatentSync-1.6 main models..."
     python -c "
-from huggingface_hub import hf_hub_download
 import os
+from huggingface_hub import hf_hub_download
+token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')
 for f in ['latentsync_unet.pt', 'stable_syncnet.pt', 'config.json']:
     out = os.path.join('$CHECKPOINTS', f)
     if not os.path.exists(out):
         print(f'  Downloading {f}...')
-        hf_hub_download('ByteDance/LatentSync-1.6', filename=f, local_dir='$CHECKPOINTS')
+        hf_hub_download('ByteDance/LatentSync-1.6', filename=f,
+                        local_dir='$CHECKPOINTS', token=token)
     else:
         print(f'  Already exists: {f}')
-" || warn "  Failed to download LatentSync models. Check HF login and license."
+" || warn "  Failed to download LatentSync models. Check token and license acceptance."
 fi
 
 # --- SD-VAE-FT-MSE ---
 log "  Downloading SD-VAE-FT-MSE..."
 python -c "
-from huggingface_hub import hf_hub_download
 import os
+from huggingface_hub import hf_hub_download
+token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')
 for f in ['diffusion_pytorch_model.safetensors', 'config.json']:
     out = os.path.join('$CHECKPOINTS/vae', f)
     if not os.path.exists(out):
         print(f'  Downloading {f}...')
-        hf_hub_download('stabilityai/sd-vae-ft-mse', filename=f, local_dir='$CHECKPOINTS/vae')
+        hf_hub_download('stabilityai/sd-vae-ft-mse', filename=f,
+                        local_dir='$CHECKPOINTS/vae', token=token)
     else:
         print(f'  Already exists: {f}')
 " || warn "  Failed to download SD-VAE."
@@ -283,14 +322,16 @@ for f in ['diffusion_pytorch_model.safetensors', 'config.json']:
 # --- Whisper tiny ---
 log "  Downloading Whisper tiny..."
 python -c "
-from huggingface_hub import hf_hub_download, list_repo_files
 import os
-for f in list_repo_files('openai/whisper-tiny'):
+from huggingface_hub import hf_hub_download, list_repo_files
+token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGING_FACE_HUB_TOKEN')
+for f in list_repo_files('openai/whisper-tiny', token=token):
     if f.endswith('.pt'):
         out = os.path.join('$CHECKPOINTS/whisper', f)
         if not os.path.exists(out):
             print(f'  Downloading {f}...')
-            hf_hub_download('openai/whisper-tiny', filename=f, local_dir='$CHECKPOINTS/whisper')
+            hf_hub_download('openai/whisper-tiny', filename=f,
+                            local_dir='$CHECKPOINTS/whisper', token=token)
         else:
             print(f'  Already exists: {f}')
 " || warn "  Failed to download Whisper tiny."

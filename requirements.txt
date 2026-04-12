@@ -4,8 +4,11 @@
 
 # Local TTS — Kokoro (hexgrad/Kokoro-82M, MIT license, real-time on Apple Silicon)
 # System dep required: brew install espeak-ng
+python-dotenv>=1.0.0
 kokoro>=0.9.4
 faster-whisper>=1.0.0
+kornia>=0.7.0
+insightface>=0.7.0
 pyyaml
 pillow
 requests
