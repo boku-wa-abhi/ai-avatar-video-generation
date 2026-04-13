@@ -134,6 +134,7 @@ class SadTalkerInference:
             "--preprocess", effective_preprocess,
             "--expression_scale", str(expr_scale),
             "--pose_style", str(pose_style),
+            "--batch_size", "4",
         ]
 
         if effective_still:

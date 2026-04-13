@@ -99,6 +99,10 @@ def save_uploaded_avatar(file_path: str) -> tuple[str | None, str, list]:
 
     try:
         AVATARS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Keep a named copy so gallery shows it
+        src = Path(file_path)
+        original_name = src.stem
         img = Image.open(file_path).convert("RGB")
         target = 512
         ratio = min(target / img.width, target / img.height)
@@ -107,6 +111,11 @@ def save_uploaded_avatar(file_path: str) -> tuple[str | None, str, list]:
         img = img.resize((new_w, new_h), Image.LANCZOS)
         canvas = Image.new("RGB", (target, target), (255, 255, 255))
         canvas.paste(img, ((target - new_w) // 2, (target - new_h) // 2))
+
+        # Also save the original-name version in the gallery
+        gallery_copy = AVATARS_DIR / f"{original_name}.png"
+        if gallery_copy.name != "avatar.png":
+            canvas.save(str(gallery_copy), "PNG")
 
         dest = AVATARS_DIR / "avatar.png"
         canvas.save(str(dest), "PNG")
@@ -253,114 +262,99 @@ def generate_video(
     st_preprocess: str = "full",
     progress=gr.Progress(track_tqdm=False),
 ):
-    """Run the full 7-step pipeline, streaming progress updates to the UI."""
+    """Run the full 7-step pipeline with rich HTML progress updates."""
     _cancel_event.clear()
-    log_lines: list[str] = []
     wall_start = time.time()
-    step = 0
+    TOTAL = 7
 
-    def log(msg: str):
-        log_lines.append(f"[{_ts()}] {msg}")
+    # State for rich progress panel
+    states = ["waiting"] * TOTAL
+    times = [""] * TOTAL
+    engine_label = lipsync_engine
 
-    def current_log() -> str:
-        return "\n".join(log_lines)
+    def elapsed_str():
+        s = int(time.time() - wall_start)
+        return f"{s // 60}m {s % 60:02d}s"
 
+    def step_time(t0):
+        d = time.time() - t0
+        return f"{d:.1f}s" if d < 60 else f"{int(d)//60}m {int(d)%60}s"
+
+    def render(pct, msg=""):
+        return _build_progress_html(states, times, pct, elapsed_str(), engine_label, msg)
+
+    # ── Validation ────────────────────────────────────────────────────────
     if not script or not script.strip():
-        log("❌ ERROR: Script is empty.")
-        yield None, current_log(), "", get_video_history()
+        states[0] = "error"
+        yield None, render(0, "Script is empty — please enter text above."), "", get_video_history()
         return
 
     avatar_png = AVATARS_DIR / "avatar.png"
     if not avatar_png.exists():
-        log("❌ ERROR: No avatar image found. Upload a PNG in the Avatar section.")
-        yield None, current_log(), "", get_video_history()
+        states[0] = "error"
+        yield None, render(0, "No avatar found — upload a PNG/JPG in the Avatar section."), "", get_video_history()
         return
 
     voice_id    = VOICE_CHOICES.get(voice_choice, "af_heart")
     orient_code = ORIENTATION_MAP.get(orientation, "9:16")
     background  = str(background_file) if background_file and Path(background_file).exists() else "black"
-
     run_id      = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = str(OUTPUT_DIR / f"studio_{run_id}.mp4")
+    engine_map = {
+        "MuseTalk 1.5 (default)": "musetalk",
+        "SadTalker (256 px)": "sadtalker",
+        "SadTalker HD (512 px + GFPGAN)": "sadtalker_hd",
+    }
+    engine_key = engine_map.get(lipsync_engine, "musetalk")
 
-    TOTAL = 7
-    step_labels = [
-        "Generating voice audio",
-        "Converting to 16 kHz",
-        "Running lip-sync",
-        "Enhancing face",
-        "Compositing background",
-        "Generating captions",
-        "Final encode",
-    ]
-
-    log("Pipeline starting...")
-    log(f"   Voice: {voice_choice} ({voice_id})")
-    log(f"   Orientation: {orient_code}")
-    log(f"   Script: {len(script)} chars")
     progress(0, desc="Starting pipeline...")
-    yield None, current_log(), "", get_video_history()
+    yield None, render(0), "", get_video_history()
 
     try:
         from avatarpipeline.voice.kokoro import VoiceGenerator
         from avatarpipeline.postprocess.assembler import VideoAssembler
     except ImportError as e:
-        log(f"❌ ERROR: Module import failed: {e}")
-        yield None, current_log(), "", get_video_history()
+        states[0] = "error"
+        yield None, render(0, f"Import failed: {e}"), "", get_video_history()
         return
 
     try:
         # ── STEP 1: TTS ──────────────────────────────────────────────────
         if _cancel_event.is_set():
-            log("⏹ Cancelled by user.")
-            yield None, current_log(), "", get_video_history()
+            yield None, render(0, "Cancelled."), "", get_video_history()
             return
-
-        step = 1
-        log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
-        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: TTS")
-        yield None, current_log(), "", get_video_history()
+        states[0] = "active"
+        progress(1 / TOTAL, desc="Step 1/7: Voice synthesis")
+        yield None, render(1 / TOTAL), "", get_video_history()
 
         t0 = time.time()
         vg = VoiceGenerator()
         speech_wav = str(AUDIO_DIR / f"speech_{run_id}.wav")
         vg.generate(script, voice=voice_id, out_path=speech_wav)
-        log(f"STEP {step}/{TOTAL}: ✅ Voice generated ({time.time()-t0:.1f}s)")
-        yield None, current_log(), "", get_video_history()
+        states[0] = "done"; times[0] = step_time(t0)
+        yield None, render(1 / TOTAL), "", get_video_history()
 
         # ── STEP 2: Resample ─────────────────────────────────────────────
         if _cancel_event.is_set():
-            log("⏹ Cancelled by user.")
-            yield None, current_log(), "", get_video_history()
+            yield None, render(1 / TOTAL, "Cancelled."), "", get_video_history()
             return
-
-        step = 2
-        log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
-        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Audio prep")
-        yield None, current_log(), "", get_video_history()
+        states[1] = "active"
+        progress(2 / TOTAL, desc="Step 2/7: Audio prep")
+        yield None, render(2 / TOTAL), "", get_video_history()
 
         t0 = time.time()
         speech_16k = str(AUDIO_DIR / f"speech_{run_id}_16k.wav")
         vg.convert_to_16k(speech_wav, speech_16k)
-        log(f"STEP {step}/{TOTAL}: ✅ Audio ready ({time.time()-t0:.1f}s)")
-        yield None, current_log(), "", get_video_history()
+        states[1] = "done"; times[1] = step_time(t0)
+        yield None, render(2 / TOTAL), "", get_video_history()
 
         # ── STEP 3: Lip-sync ─────────────────────────────────────────────
         if _cancel_event.is_set():
-            log("⏹ Cancelled by user.")
-            yield None, current_log(), "", get_video_history()
+            yield None, render(2 / TOTAL, "Cancelled."), "", get_video_history()
             return
-
-        step = 3
-        engine_map = {
-            "MuseTalk 1.5 (default)": "musetalk",
-            "SadTalker (256 px)": "sadtalker",
-            "SadTalker HD (512 px + GFPGAN)": "sadtalker_hd",
-        }
-        engine_key = engine_map.get(lipsync_engine, "musetalk")
-        log(f"STEP {step}/{TOTAL}: Running {lipsync_engine} lip-sync...")
-        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Lip-sync ({lipsync_engine})")
-        yield None, current_log(), "", get_video_history()
+        states[2] = "active"
+        progress(3 / TOTAL, desc=f"Step 3/7: Lip-sync ({lipsync_engine})")
+        yield None, render(3 / TOTAL), "", get_video_history()
 
         t0 = time.time()
         lipsync_mp4 = str(OUTPUT_DIR / f"lipsync_{run_id}.mp4")
@@ -386,44 +380,37 @@ def generate_video(
                 bbox_shift=mt_bbox_shift,
             )
 
-        em, es = divmod(int(time.time() - t0), 60)
-        log(f"STEP {step}/{TOTAL}: ✅ Lip-sync complete ({em}m {es}s)")
-        yield None, current_log(), "", get_video_history()
+        states[2] = "done"; times[2] = step_time(t0)
+        yield None, render(3 / TOTAL), "", get_video_history()
 
         # ── STEP 4: Face enhancement ──────────────────────────────────────
-        step = 4
-        enhanced_mp4 = str(OUTPUT_DIR / f"enhanced_{run_id}.mp4")
-
         if enhance_face and not preview_mode:
             if _cancel_event.is_set():
-                log("⏹ Cancelled by user.")
-                yield None, current_log(), "", get_video_history()
+                yield None, render(3 / TOTAL, "Cancelled."), "", get_video_history()
                 return
-
-            log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
-            progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Enhance")
-            yield None, current_log(), "", get_video_history()
+            states[3] = "active"
+            progress(4 / TOTAL, desc="Step 4/7: Face enhancement")
+            yield None, render(4 / TOTAL), "", get_video_history()
 
             t0 = time.time()
+            enhanced_mp4 = str(OUTPUT_DIR / f"enhanced_{run_id}.mp4")
             from avatarpipeline.postprocess.enhancer import FaceEnhancer
             fe = FaceEnhancer()
             enhanced_mp4 = fe.enhance(lipsync_mp4, enhanced_mp4)
-            log(f"STEP {step}/{TOTAL}: ✅ Enhancement done ({time.time()-t0:.1f}s)")
+            states[3] = "done"; times[3] = step_time(t0)
         else:
+            enhanced_mp4 = str(OUTPUT_DIR / f"enhanced_{run_id}.mp4")
             shutil.copy(lipsync_mp4, enhanced_mp4)
-            log(f"STEP {step}/{TOTAL}: ⏭️  Enhancement skipped")
-        yield None, current_log(), "", get_video_history()
+            states[3] = "skipped"; times[3] = "—"
+        yield None, render(4 / TOTAL), "", get_video_history()
 
         # ── STEP 5: Background composite ─────────────────────────────────
         if _cancel_event.is_set():
-            log("⏹ Cancelled by user.")
-            yield None, current_log(), "", get_video_history()
+            yield None, render(4 / TOTAL, "Cancelled."), "", get_video_history()
             return
-
-        step = 5
-        log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
-        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Composite")
-        yield None, current_log(), "", get_video_history()
+        states[4] = "active"
+        progress(5 / TOTAL, desc="Step 5/7: Composite")
+        yield None, render(5 / TOTAL), "", get_video_history()
 
         t0 = time.time()
         va = VideoAssembler()
@@ -432,48 +419,39 @@ def generate_video(
             enhanced_mp4, orientation=orient_code,
             background=background, output_path=composed_mp4,
         )
-
         if music_volume > 0 and background_file and Path(background_file).suffix.lower() in (".mp3", ".wav", ".m4a"):
             music_out = composed_mp4.replace(".mp4", "_music.mp4")
             composed_mp4 = va.add_music(composed_mp4, str(background_file), music_volume=music_volume, output_path=music_out)
-
-        log(f"STEP {step}/{TOTAL}: ✅ Composite done ({time.time()-t0:.1f}s)")
-        yield None, current_log(), "", get_video_history()
+        states[4] = "done"; times[4] = step_time(t0)
+        yield None, render(5 / TOTAL), "", get_video_history()
 
         # ── STEP 6: Captions ─────────────────────────────────────────────
-        step = 6
         srt_path = None
-
         if add_captions and not preview_mode:
             if _cancel_event.is_set():
-                log("⏹ Cancelled by user.")
-                yield None, current_log(), "", get_video_history()
+                yield None, render(5 / TOTAL, "Cancelled."), "", get_video_history()
                 return
-
-            log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
-            progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Captions")
-            yield None, current_log(), "", get_video_history()
+            states[5] = "active"
+            progress(6 / TOTAL, desc="Step 6/7: Captions")
+            yield None, render(6 / TOTAL), "", get_video_history()
 
             t0 = time.time()
             from avatarpipeline.postprocess.captions import CaptionGenerator
             cg = CaptionGenerator()
             srt_path = str(CAPTIONS_DIR / f"captions_{run_id}.srt")
             srt_path = cg.transcribe(speech_16k, srt_path)
-            log(f"STEP {step}/{TOTAL}: ✅ Captions generated ({time.time()-t0:.1f}s)")
+            states[5] = "done"; times[5] = step_time(t0)
         else:
-            log(f"STEP {step}/{TOTAL}: ⏭️  Captions skipped")
-        yield None, current_log(), "", get_video_history()
+            states[5] = "skipped"; times[5] = "—"
+        yield None, render(6 / TOTAL), "", get_video_history()
 
         # ── STEP 7: Final encode ──────────────────────────────────────────
         if _cancel_event.is_set():
-            log("⏹ Cancelled by user.")
-            yield None, current_log(), "", get_video_history()
+            yield None, render(6 / TOTAL, "Cancelled."), "", get_video_history()
             return
-
-        step = 7
-        log(f"STEP {step}/{TOTAL}: {step_labels[step-1]}...")
-        progress(step / TOTAL, desc=f"Step {step}/{TOTAL}: Encoding")
-        yield None, current_log(), "", get_video_history()
+        states[6] = "active"
+        progress(7 / TOTAL, desc="Step 7/7: Final encode")
+        yield None, render(7 / TOTAL), "", get_video_history()
 
         t0 = time.time()
         va.finalize(
@@ -481,25 +459,29 @@ def generate_video(
             srt_path=srt_path,
             include_captions=(add_captions and not preview_mode),
         )
-        log(f"STEP {step}/{TOTAL}: ✅ Final encode done ({time.time()-t0:.1f}s)")
+        states[6] = "done"; times[6] = step_time(t0)
 
         wall_secs = time.time() - wall_start
-        m, s = int(wall_secs) // 60, int(wall_secs) % 60
-        log("")
-        log(f"🎉 Pipeline complete in {m}m {s}s")
-        log(f"📁 Output: {output_path}")
         progress(1.0, desc="Done!")
-
-        yield output_path, current_log(), get_video_metadata(output_path, wall_secs), get_video_history()
+        m, s = int(wall_secs) // 60, int(wall_secs) % 60
+        yield (
+            output_path,
+            render(1.0, f"Pipeline complete in {m}m {s:02d}s"),
+            get_video_metadata(output_path, wall_secs),
+            get_video_history(),
+        )
 
     except Exception as exc:
-        log("")
-        log(f"❌ ERROR at STEP {step}/{TOTAL}: {exc}")
+        # Mark current step as error
+        for i, s in enumerate(states):
+            if s == "active":
+                states[i] = "error"
+                break
         logger.error(f"Dashboard pipeline error: {exc}")
         for p in OUTPUT_DIR.glob(f"*{run_id}*"):
             if "studio_" not in p.name:
                 p.unlink(missing_ok=True)
-        yield None, current_log(), "", get_video_history()
+        yield None, render(0, f"Error: {exc}"), "", get_video_history()
 
 
 def cancel_generation():
@@ -511,6 +493,72 @@ def _toggle_lipsync_params(engine: str):
     """Show MuseTalk params for MuseTalk, SadTalker params for SadTalker variants."""
     is_musetalk = "MuseTalk" in engine
     return gr.update(visible=is_musetalk), gr.update(visible=not is_musetalk)
+
+
+# ── Rich progress panel renderer ─────────────────────────────────────────────
+
+_STEP_ICONS = {
+    "done": ("✓", "done"),
+    "active": ("⟳", "active"),
+    "waiting": ("·", "waiting"),
+    "skipped": ("—", "skipped"),
+    "error": ("✗", "error"),
+}
+
+STEP_NAMES = [
+    "Voice Synthesis (TTS)",
+    "Audio Resampling",
+    "Lip-sync Generation",
+    "Face Enhancement",
+    "Background Composite",
+    "Caption Generation",
+    "Final Encode",
+]
+
+
+def _build_progress_html(
+    step_states: list[str],
+    step_times: list[str],
+    pct: float,
+    elapsed: str,
+    engine: str = "",
+    message: str = "",
+) -> str:
+    """Render the pipeline progress as a styled HTML panel.
+
+    Args:
+        step_states: list of 7 states from ('done','active','waiting','skipped','error')
+        step_times:  list of 7 time strings (e.g. '2.1s', '', '—')
+        pct:         overall progress 0.0–1.0
+        elapsed:     total elapsed string
+        engine:      engine name for step 3 label
+        message:     optional footer message
+    """
+    rows = []
+    for i, (name, state, t) in enumerate(zip(STEP_NAMES, step_states, step_times)):
+        icon_char, css_cls = _STEP_ICONS[state]
+        label_cls = "active" if state == "active" else ("waiting" if state == "waiting" else "")
+        label = name
+        if i == 2 and engine:
+            label = f"{name} — {engine}"
+        rows.append(
+            f'<div class="step-row">'
+            f'<div class="step-icon {css_cls}">{icon_char}</div>'
+            f'<div class="step-label {label_cls}">{label}</div>'
+            f'<div class="step-time">{t}</div>'
+            f'</div>'
+        )
+    bar_pct = max(0, min(100, int(pct * 100)))
+    footer = f'<div style="color:#34d399;font-size:0.82rem;margin-top:12px;font-weight:600">{message}</div>' if message else ""
+    return (
+        f'<div class="pipeline-progress">'
+        f'<div class="pipeline-title">Pipeline Progress</div>'
+        f'{"".join(rows)}'
+        f'<div class="progress-bar-outer"><div class="progress-bar-inner" style="width:{bar_pct}%"></div></div>'
+        f'<div class="elapsed">Elapsed: {elapsed}</div>'
+        f'{footer}'
+        f'</div>'
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -609,6 +657,58 @@ CSS = """
 }
 .cancel-btn { border-radius: 10px !important; font-weight: 500 !important; }
 
+/* ── Pipeline Progress Panel ─────────────────────────────────────────────── */
+.pipeline-progress {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    border-radius: 12px; padding: 20px 24px;
+    border: 1px solid rgba(255,255,255,0.06);
+    font-family: 'Inter', -apple-system, sans-serif;
+}
+.pipeline-progress .pipeline-title {
+    font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.1em; color: #64748b; margin-bottom: 16px;
+}
+.pipeline-progress .step-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.pipeline-progress .step-row:last-child { border-bottom: none; }
+.pipeline-progress .step-icon {
+    width: 28px; height: 28px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; flex-shrink: 0; font-weight: 600;
+}
+.pipeline-progress .step-icon.done { background: rgba(16,185,129,0.15); color: #34d399; }
+.pipeline-progress .step-icon.active { background: rgba(99,102,241,0.2); color: #a5b4fc; animation: pulse 1.5s infinite; }
+.pipeline-progress .step-icon.waiting { background: rgba(100,116,139,0.1); color: #475569; }
+.pipeline-progress .step-icon.skipped { background: rgba(100,116,139,0.08); color: #64748b; }
+.pipeline-progress .step-icon.error { background: rgba(239,68,68,0.15); color: #f87171; }
+.pipeline-progress .step-label {
+    flex: 1; font-size: 0.82rem; color: #cbd5e1; font-weight: 500;
+}
+.pipeline-progress .step-label.active { color: #e2e8f0; font-weight: 600; }
+.pipeline-progress .step-label.waiting { color: #475569; }
+.pipeline-progress .step-time {
+    font-size: 0.72rem; color: #64748b; font-family: 'JetBrains Mono', monospace;
+    min-width: 50px; text-align: right;
+}
+.pipeline-progress .progress-bar-outer {
+    width: 100%; height: 4px; background: rgba(255,255,255,0.06);
+    border-radius: 2px; margin-top: 16px; overflow: hidden;
+}
+.pipeline-progress .progress-bar-inner {
+    height: 100%; border-radius: 2px; transition: width 0.5s ease;
+    background: linear-gradient(90deg, #0d9488, #10b981, #34d399);
+}
+.pipeline-progress .elapsed {
+    font-size: 0.72rem; color: #64748b; margin-top: 8px; text-align: right;
+    font-family: 'JetBrains Mono', monospace;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
 /* ── Log Box ─────────────────────────────────────────────────────────────── */
 .log-box textarea {
     font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Menlo', monospace !important;
@@ -672,9 +772,18 @@ with gr.Blocks(title="Avatar Studio") as demo:
         with gr.Column(scale=1, min_width=280):
             gr.Markdown("<p class='section-label'>Avatar</p>")
             avatar_upload = gr.Image(
-                label="Upload or drop avatar image",
+                label="Upload avatar (PNG or JPG)",
                 type="filepath",
-                height=260,
+                sources=["upload", "clipboard"],
+                height=160,
+                elem_classes=["avatar-display"],
+            )
+            avatar_preview = gr.Image(
+                label="Active Avatar",
+                type="filepath",
+                interactive=False,
+                height=200,
+                value=str(AVATARS_DIR / "avatar.png") if (AVATARS_DIR / "avatar.png").exists() else None,
                 elem_classes=["avatar-display"],
             )
             avatar_status = gr.Textbox(
@@ -686,9 +795,9 @@ with gr.Blocks(title="Avatar Studio") as demo:
                 ),
             )
             avatar_gallery = gr.Gallery(
-                label="Saved Avatars",
+                label="Saved Avatars (click to select)",
                 value=get_avatar_gallery(),
-                columns=3, height=130, allow_preview=False,
+                columns=4, height=130, allow_preview=False,
             )
 
         with gr.Column(scale=3):
@@ -824,9 +933,9 @@ with gr.Blocks(title="Avatar Studio") as demo:
             elem_classes=["cancel-btn"],
         )
 
-    log_box = gr.Textbox(
-        label="Pipeline Log", lines=10,
-        interactive=False, elem_classes=["log-box"],
+    log_box = gr.HTML(
+        value="<div class='pipeline-progress'><div class='pipeline-title'>Pipeline Progress</div>"
+              "<div style='color:#475569;font-size:0.82rem;padding:12px 0'>Ready — click Generate Video to start</div></div>",
     )
 
     # ── Output ───────────────────────────────────────────────────────────────
@@ -860,12 +969,12 @@ with gr.Blocks(title="Avatar Studio") as demo:
     avatar_upload.change(
         fn=save_uploaded_avatar,
         inputs=[avatar_upload],
-        outputs=[avatar_upload, avatar_status, avatar_gallery],
+        outputs=[avatar_preview, avatar_status, avatar_gallery],
     )
     avatar_gallery.select(
         fn=select_avatar_from_gallery,
         inputs=None,
-        outputs=[avatar_upload, avatar_status],
+        outputs=[avatar_preview, avatar_status],
     )
     script_box.change(
         fn=update_char_count,
