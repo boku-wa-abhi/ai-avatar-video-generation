@@ -196,6 +196,84 @@ def update_char_count(text: str) -> str:
     return f"<span style='color:#94a3b8;font-size:0.82rem'>{n:,} characters · Kokoro TTS (local, free)</span>"
 
 
+# ── Time estimation ──────────────────────────────────────────────────────────
+
+_LIPSYNC_REALTIME_FACTOR = {
+    "MuseTalk 1.5 (default)":        14,   # ~14s generation per 1s of audio
+    "SadTalker (256 px)":            15,
+    "SadTalker HD (512 px + GFPGAN)": 90,  # GFPGAN per-frame is slow on MPS
+}
+
+
+def _audio_duration_from_file(path: str) -> float:
+    """Return audio duration in seconds using ffprobe, or 0.0 on failure."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=5,
+        )
+        return float(r.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def estimate_generation_time(
+    script: str,
+    audio_file: str | None,
+    engine: str,
+) -> str:
+    """Return a small HTML estimate card shown below the script/audio inputs."""
+    has_audio = bool(audio_file and Path(audio_file).exists())
+
+    if has_audio:
+        dur = _audio_duration_from_file(audio_file)
+        if dur <= 0:
+            return ""
+        source_label = f"Uploaded audio — {dur:.1f}s"
+        tts_secs = 0
+    elif script and script.strip():
+        words = len(script.split())
+        if words == 0:
+            return ""
+        dur = words / 150 * 60   # 150 wpm average
+        source_label = f"{words:,} words → ~{dur:.0f}s of speech"
+        tts_secs = max(8, dur * 0.15)   # Kokoro is fast: ~15% of audio length
+    else:
+        return ""
+
+    factor = _LIPSYNC_REALTIME_FACTOR.get(engine, 14)
+    lipsync_secs  = dur * factor
+    overhead_secs = 12   # composite + encode + resample
+    total_secs    = tts_secs + lipsync_secs + overhead_secs
+
+    def _fmt(s: float) -> str:
+        m = int(s) // 60
+        sec = int(s) % 60
+        return f"{m}m {sec:02d}s" if m else f"{sec}s"
+
+    vid_len   = _fmt(dur)
+    lip_str   = _fmt(lipsync_secs)
+    total_str = _fmt(total_secs)
+    tts_str   = "—" if tts_secs == 0 else _fmt(tts_secs)
+
+    engine_short = engine.split("(")[0].strip()
+    warn = ""
+    if factor >= 60:
+        warn = "<br><span style='color:#b45309'>⚠ HD mode is slow — consider SadTalker 256 px for quick tests</span>"
+
+    return (
+        f"<div style='background:#f0fdf4;border:1px solid #86efac;border-radius:8px;"
+        f"padding:9px 14px;font-size:0.81rem;color:#14532d;margin-top:4px;line-height:1.6'>"
+        f"<b>Estimate</b> · {source_label} · Video length ≈ <b>{vid_len}</b><br>"
+        f"<span style='color:#166534'>TTS: {tts_str} &nbsp;|&nbsp; "
+        f"Lip-sync ({engine_short}): {lip_str} &nbsp;|&nbsp; "
+        f"<b>Total ≈ {total_str}</b></span>"
+        f"{warn}"
+        f"</div>"
+    )
+
+
 # ── Video metadata card ──────────────────────────────────────────────────────
 
 def get_video_metadata(video_path: str, gen_time_secs: float) -> str:
@@ -244,6 +322,7 @@ def get_video_metadata(video_path: str, gen_time_secs: float) -> str:
 
 def generate_video(
     script: str,
+    audio_file: str | None,
     voice_choice: str,
     orientation: str,
     music_volume: float,
@@ -284,9 +363,10 @@ def generate_video(
         return _build_progress_html(states, times, pct, elapsed_str(), engine_label, msg)
 
     # ── Validation ────────────────────────────────────────────────────────
-    if not script or not script.strip():
+    has_audio = bool(audio_file and Path(audio_file).exists())
+    if not has_audio and (not script or not script.strip()):
         states[0] = "error"
-        yield None, render(0, "Script is empty — please enter text above."), "", get_video_history()
+        yield None, render(0, "Enter a script or upload an audio file."), "", get_video_history()
         return
 
     avatar_png = AVATARS_DIR / "avatar.png"
@@ -319,20 +399,26 @@ def generate_video(
         return
 
     try:
-        # ── STEP 1: TTS ──────────────────────────────────────────────────
-        if _cancel_event.is_set():
-            yield None, render(0, "Cancelled."), "", get_video_history()
-            return
-        states[0] = "active"
-        progress(1 / TOTAL, desc="Step 1/7: Voice synthesis")
-        yield None, render(1 / TOTAL), "", get_video_history()
+        # ── STEP 1: TTS (skipped when audio is uploaded) ─────────────────
+        speech_wav = audio_file if has_audio else None
+        if has_audio:
+            states[0] = "skipped"; times[0] = "—"
+            progress(1 / TOTAL, desc="Step 1/7: Voice synthesis (skipped — audio uploaded)")
+            yield None, render(1 / TOTAL), "", get_video_history()
+        else:
+            if _cancel_event.is_set():
+                yield None, render(0, "Cancelled."), "", get_video_history()
+                return
+            states[0] = "active"
+            progress(1 / TOTAL, desc="Step 1/7: Voice synthesis")
+            yield None, render(1 / TOTAL), "", get_video_history()
 
-        t0 = time.time()
-        vg = VoiceGenerator()
-        speech_wav = str(AUDIO_DIR / f"speech_{run_id}.wav")
-        vg.generate(script, voice=voice_id, out_path=speech_wav)
-        states[0] = "done"; times[0] = step_time(t0)
-        yield None, render(1 / TOTAL), "", get_video_history()
+            t0 = time.time()
+            vg = VoiceGenerator()
+            speech_wav = str(AUDIO_DIR / f"speech_{run_id}.wav")
+            vg.generate(script, voice=voice_id, out_path=speech_wav)
+            states[0] = "done"; times[0] = step_time(t0)
+            yield None, render(1 / TOTAL), "", get_video_history()
 
         # ── STEP 2: Resample ─────────────────────────────────────────────
         if _cancel_event.is_set():
@@ -344,7 +430,17 @@ def generate_video(
 
         t0 = time.time()
         speech_16k = str(AUDIO_DIR / f"speech_{run_id}_16k.wav")
-        vg.convert_to_16k(speech_wav, speech_16k)
+        if has_audio:
+            # Convert uploaded audio to 16 kHz mono using ffmpeg directly
+            r16 = subprocess.run(
+                ["ffmpeg", "-y", "-i", speech_wav,
+                 "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", speech_16k],
+                capture_output=True, text=True,
+            )
+            if r16.returncode != 0:
+                raise RuntimeError(f"Audio conversion failed:\n{r16.stderr[-500:]}")
+        else:
+            vg.convert_to_16k(speech_wav, speech_16k)
         states[1] = "done"; times[1] = step_time(t0)
         yield None, render(2 / TOTAL), "", get_video_history()
 
@@ -811,6 +907,22 @@ with gr.Blocks(title="Avatar Studio") as demo:
                 "<span style='color:#94a3b8;font-size:0.82rem'>0 characters · Kokoro TTS (local, free)</span>"
             )
 
+            with gr.Row(equal_height=True):
+                gr.HTML(
+                    "<div style='display:flex;align-items:center;gap:8px;"
+                    "color:#64748b;font-size:0.78rem;padding:6px 0'>"
+                    "<span style='flex:1;height:1px;background:#e2e8f0'></span>"
+                    "<span style='white-space:nowrap'>or upload audio directly</span>"
+                    "<span style='flex:1;height:1px;background:#e2e8f0'></span>"
+                    "</div>"
+                )
+            audio_upload_audio = gr.Audio(
+                label="Upload audio file (MP3 / WAV / M4A) — bypasses TTS",
+                type="filepath",
+                sources=["upload"],
+            )
+            estimate_html = gr.HTML(value="")
+
             gr.Markdown("<p class='section-label'>Voice</p>")
             with gr.Row():
                 voice_dropdown = gr.Dropdown(
@@ -980,6 +1092,21 @@ with gr.Blocks(title="Avatar Studio") as demo:
         fn=update_char_count,
         inputs=[script_box], outputs=[char_counter],
     )
+    script_box.change(
+        fn=estimate_generation_time,
+        inputs=[script_box, audio_upload_audio, lipsync_radio],
+        outputs=[estimate_html],
+    )
+    audio_upload_audio.change(
+        fn=estimate_generation_time,
+        inputs=[script_box, audio_upload_audio, lipsync_radio],
+        outputs=[estimate_html],
+    )
+    lipsync_radio.change(
+        fn=estimate_generation_time,
+        inputs=[script_box, audio_upload_audio, lipsync_radio],
+        outputs=[estimate_html],
+    )
     voice_dropdown.change(
         fn=generate_voice_preview,
         inputs=[voice_dropdown], outputs=[voice_preview],
@@ -987,8 +1114,8 @@ with gr.Blocks(title="Avatar Studio") as demo:
     generate_btn.click(
         fn=generate_video,
         inputs=[
-            script_box, voice_dropdown, orientation_radio, music_slider,
-            background_upload, lipsync_radio, enhance_face_cb,
+            script_box, audio_upload_audio, voice_dropdown, orientation_radio,
+            music_slider, background_upload, lipsync_radio, enhance_face_cb,
             add_captions_cb, preview_mode_cb, caption_fontsize, caption_position,
             mt_batch_size, mt_bbox_shift,
             st_expression_scale, st_pose_style, st_still, st_preprocess,

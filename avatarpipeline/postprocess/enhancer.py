@@ -12,7 +12,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from avatarpipeline import TEMP_DIR
+from avatarpipeline import ROOT, TEMP_DIR
 
 
 class FaceEnhancer:
@@ -41,6 +41,18 @@ class FaceEnhancer:
                 logger.info("GFPGAN backend detected ✓")
             except ImportError:
                 pass
+
+        # 3. Try GFPGAN via SadTalker subprocess (no project-venv install needed)
+        if self.backend == "passthrough":
+            _sadtalker_dir = Path.home() / "SadTalker"
+            _gfpgan_weights = _sadtalker_dir / "gfpgan" / "weights" / "GFPGANv1.4.pth"
+            _sadtalker_python = _sadtalker_dir / "sadtalker-env" / "bin" / "python"
+            if _gfpgan_weights.exists() and _sadtalker_python.exists():
+                self.backend = "gfpgan_subprocess"
+                self.gfpgan_python = str(_sadtalker_python)
+                self.gfpgan_weights = str(_gfpgan_weights)
+                self.sadtalker_dir = str(_sadtalker_dir)
+                logger.info("GFPGAN (via SadTalker env subprocess) detected ✓")
 
         if self.backend == "passthrough":
             logger.warning(
@@ -104,6 +116,8 @@ class FaceEnhancer:
             self._enhance_codeformer(frames_dir, fidelity_weight)
         elif self.backend == "gfpgan":
             self._enhance_gfpgan(frames_dir, fidelity_weight)
+        elif self.backend == "gfpgan_subprocess":
+            self._enhance_gfpgan_subprocess(frames_dir)
         else:
             logger.info("Passthrough — skipping per-frame enhancement")
 
@@ -175,6 +189,25 @@ class FaceEnhancer:
                 cv2.imwrite(str(frame), restored)
         except Exception as e:
             logger.warning(f"GFPGAN failed: {e} — frames left unchanged")
+
+    def _enhance_gfpgan_subprocess(self, frames_dir: Path) -> None:
+        """Run GFPGAN on frames using the SadTalker venv's Python (no local install needed)."""
+        runner = ROOT / "data" / "temp" / "_gfpgan_runner.py"
+        if not runner.exists():
+            logger.warning(f"GFPGAN runner not found at {runner} — skipping enhancement")
+            return
+        logger.info("Running GFPGAN enhancement via SadTalker env...")
+        r = subprocess.run(
+            [
+                self.gfpgan_python, str(runner),
+                "--frames_dir", str(frames_dir),
+                "--weights", self.gfpgan_weights,
+                "--sadtalker_dir", self.sadtalker_dir,
+            ],
+            capture_output=False,
+        )
+        if r.returncode != 0:
+            logger.warning("GFPGAN subprocess returned non-zero — frames may be unenhanced")
 
     def _get_fps(self, video_path: str) -> float:
         r = subprocess.run(
