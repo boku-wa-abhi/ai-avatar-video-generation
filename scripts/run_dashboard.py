@@ -45,7 +45,7 @@ def main() -> None:
     port = args.port if args.port is not None else _find_free_port(7860, 7870)
 
     import gradio as gr
-    from ui.dashboard import CSS, demo
+    from ui.dashboard import CSS, demo, THEME
     from avatarpipeline import ASSETS_DIR
 
     print(f"\n  Avatar Studio — starting on http://{args.host}:{port}\n")
@@ -56,7 +56,7 @@ def main() -> None:
         inbrowser=not args.no_browser,
         share=args.share,
         show_error=True,
-        theme=gr.themes.Soft(),
+        theme=THEME,
         css=CSS,
         favicon_path=str(ASSETS_DIR / "favicon.png"),
         allowed_paths=[str(ROOT)],
