@@ -27,11 +27,12 @@ ASSETS_DIR: Path = ROOT / "assets"
 DATA_DIR: Path = ROOT / "data"
 AVATARS_DIR: Path = DATA_DIR / "avatars"
 AUDIO_DIR: Path = DATA_DIR / "audio"
+VOICES_DIR: Path = DATA_DIR / "voices"
 OUTPUT_DIR: Path = DATA_DIR / "output"
 CAPTIONS_DIR: Path = DATA_DIR / "captions"
 IMAGES_DIR: Path = DATA_DIR / "images"
 TEMP_DIR: Path = DATA_DIR / "temp"
 
 # Ensure runtime directories exist on import
-for _d in (AVATARS_DIR, AUDIO_DIR, OUTPUT_DIR, CAPTIONS_DIR, IMAGES_DIR, TEMP_DIR):
+for _d in (AVATARS_DIR, AUDIO_DIR, VOICES_DIR, OUTPUT_DIR, CAPTIONS_DIR, IMAGES_DIR, TEMP_DIR):
     _d.mkdir(parents=True, exist_ok=True)

@@ -38,6 +38,7 @@ from avatarpipeline import (
     CAPTIONS_DIR,
     OUTPUT_DIR,
 )
+from avatarpipeline.voice.mlx_voice import MlxVoiceStudio
 
 CONFIG_PATH = ROOT / "configs" / "settings.yaml"
 ENV_PATH    = ROOT / ".env"
@@ -557,6 +558,141 @@ def generate_audio_only(script, voice_choice, progress=gr.Progress()):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# MLX Voice Studio
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _mlx_voice_summary(profile: dict | None) -> str:
+    if not profile:
+        return (
+            "No saved voices yet.\n\n"
+            "Upload a short reference clip above, save it, then select it here for "
+            "text-to-voice or voice-to-voice conversion."
+        )
+
+    transcript = (profile.get("reference_text", "") or "").strip()
+    if len(transcript) > 180:
+        transcript = f"{transcript[:177]}..."
+
+    created_at = (profile.get("created_at", "") or "").replace("T", " ").replace("+00:00", " UTC")
+    duration = profile.get("duration_seconds", 0.0) or 0.0
+    return (
+        f"**{profile.get('name', profile.get('slug', 'Saved Voice'))}**\n\n"
+        f"- Voice ID: `{profile.get('slug', 'unknown')}`\n"
+        f"- Reference length: {duration:.1f}s\n"
+        f"- Model hint: `{profile.get('model_hint', MlxVoiceStudio.DEFAULT_TTS_MODEL)}`\n"
+        f"- Saved: {created_at or 'Unknown'}\n"
+        f"- Transcript: {transcript or 'Not stored'}"
+    )
+
+
+def _mlx_voice_dropdown_update(selected_choice: str | None = None):
+    studio = MlxVoiceStudio()
+    choices = studio.list_voice_choices()
+    value = selected_choice if selected_choice in choices else (choices[0] if choices else None)
+    return gr.update(choices=choices, value=value)
+
+
+def _mlx_voice_library_state(selected_choice: str | None = None):
+    studio = MlxVoiceStudio()
+    choices = studio.list_voice_choices()
+    value = selected_choice if selected_choice in choices else (choices[0] if choices else None)
+    preview, summary = get_mlx_voice_profile_details(value)
+    return gr.update(choices=choices, value=value), preview, summary
+
+
+def get_mlx_voice_profile_details(choice: str | None) -> tuple[str | None, str]:
+    studio = MlxVoiceStudio()
+    profile = studio.get_voice_profile(choice)
+    if not profile:
+        return None, _mlx_voice_summary(None)
+    return profile.get("reference_audio_path"), _mlx_voice_summary(profile)
+
+
+def refresh_mlx_voice_library(selected_choice: str | None = None):
+    return _mlx_voice_library_state(selected_choice)
+
+
+def save_mlx_voice_profile(name, reference_audio, reference_text, model_choice, progress=gr.Progress()):
+    if not reference_audio:
+        return "Upload a reference audio clip first.", _mlx_voice_dropdown_update(None), None, _mlx_voice_summary(None)
+
+    try:
+        progress(0.2, desc="Saving reference voice locally...")
+        studio = MlxVoiceStudio()
+        profile = studio.save_voice_profile(
+            name=name,
+            audio_path=reference_audio,
+            transcript=reference_text,
+            model_id=model_choice,
+        )
+        choice = f"{profile['name']} [{profile['slug']}]"
+        dropdown, preview, summary = _mlx_voice_library_state(choice)
+        progress(1.0, desc="Saved")
+        return (
+            f"Saved voice profile — `{profile['slug']}`",
+            dropdown,
+            preview,
+            summary,
+        )
+    except Exception as e:
+        logger.error(f"MLX voice save failed: {e}")
+        return f"Save failed: {e}", _mlx_voice_dropdown_update(None), None, _mlx_voice_summary(None)
+
+
+def generate_mlx_voice_audio(script, voice_choice, model_choice, language_choice, speed, pitch_shift, progress=gr.Progress()):
+    if not script or not script.strip():
+        return None, "Enter text to generate audio."
+
+    try:
+        progress(0.15, desc="Loading selected voice...")
+        studio = MlxVoiceStudio()
+        progress(0.45, desc="Generating speech with MLX voice cloning...")
+        output = studio.synthesize_with_voice(
+            text=script,
+            voice_choice=voice_choice,
+            model_id=model_choice,
+            lang_code=language_choice,
+            speed=float(speed),
+            pitch_shift=float(pitch_shift),
+        )
+        progress(1.0, desc="Done")
+        return output, f"Audio saved — {Path(output).name}"
+    except Exception as e:
+        logger.error(f"MLX cloned TTS failed: {e}")
+        return None, f"Generation failed: {e}"
+
+
+def convert_mlx_voice_audio(source_audio, voice_choice, transcript_override, model_choice, language_choice, speed, pitch_shift, progress=gr.Progress()):
+    if not source_audio:
+        return None, "", "Upload audio to convert first."
+
+    try:
+        progress(0.2, desc="Transcribing uploaded audio locally...")
+        studio = MlxVoiceStudio()
+        output, transcript = studio.convert_voice(
+            source_audio=source_audio,
+            voice_choice=voice_choice,
+            transcript_override=transcript_override,
+            model_id=model_choice,
+            lang_code=language_choice,
+            speed=float(speed),
+            pitch_shift=float(pitch_shift),
+        )
+        progress(1.0, desc="Done")
+        return output, transcript, f"Converted audio saved — {Path(output).name}"
+    except Exception as e:
+        logger.error(f"MLX voice conversion failed: {e}")
+        return None, "", f"Conversion failed: {e}"
+
+
+_MLX_MODEL_LABELS = MlxVoiceStudio.model_labels()
+_MLX_LANGUAGE_LABELS = MlxVoiceStudio.language_labels()
+_MLX_INITIAL_CHOICES = MlxVoiceStudio().list_voice_choices()
+_MLX_INITIAL_VOICE = _MLX_INITIAL_CHOICES[0] if _MLX_INITIAL_CHOICES else None
+_MLX_INITIAL_PREVIEW, _MLX_INITIAL_SUMMARY = get_mlx_voice_profile_details(_MLX_INITIAL_VOICE)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Logo
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -939,7 +1075,149 @@ with gr.Blocks(title="Avatar Studio") as demo:
             tts_generate_btn.click(fn=generate_audio_only, inputs=[tts_script, tts_voice], outputs=[tts_output, tts_status])
 
         # ══════════════════════════════════════════════════════════════════════
-        # TAB 2: Audio to Lipsync
+        # TAB 2: Voice Studio
+        # ══════════════════════════════════════════════════════════════════════
+        with gr.TabItem("Voice Studio", id="tab-voice-studio"):
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>graphic_eq</span> MLX Voice Studio</div>")
+            gr.Markdown(
+                "Save reference voices locally, then use them for **text-to-voice** and **voice-to-voice** conversion on Apple Silicon. "
+                "The first run downloads the selected MLX model into your local Hugging Face cache. "
+                "Voice-to-voice here is transcript-guided: the uploaded audio is transcribed locally and then re-synthesized in the selected saved voice."
+            )
+
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=3):
+                    gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>library_add</span> Save New Voice</div>")
+                    vs_voice_name = gr.Textbox(label="Voice Name", placeholder="e.g. My Narrator")
+                    vs_reference_audio = gr.Audio(
+                        label="Reference Audio",
+                        type="filepath",
+                        sources=["upload"],
+                    )
+                    vs_reference_text = gr.Textbox(
+                        label="Reference Transcript (optional)",
+                        placeholder="Leave blank to auto-transcribe locally with MLX Whisper…",
+                        lines=3,
+                    )
+                    vs_model = gr.Dropdown(
+                        label="MLX Model",
+                        choices=_MLX_MODEL_LABELS,
+                        value=_MLX_MODEL_LABELS[0],
+                    )
+                    vs_save_btn = gr.Button("Save Voice", variant="primary", elem_classes=["g-btn-primary"])
+                    vs_save_status = gr.Markdown("")
+
+                with gr.Column(scale=2):
+                    gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>folder_managed</span> Saved Voices</div>")
+                    with gr.Row():
+                        vs_saved_voice = gr.Dropdown(
+                            label="Target Saved Voice",
+                            choices=_MLX_INITIAL_CHOICES,
+                            value=_MLX_INITIAL_VOICE,
+                            scale=4,
+                        )
+                        vs_refresh_btn = gr.Button("Refresh", scale=1)
+                    vs_preview = gr.Audio(label="Reference Preview", type="filepath", interactive=False, value=_MLX_INITIAL_PREVIEW)
+                    vs_meta = gr.Markdown(_MLX_INITIAL_SUMMARY)
+
+            gr.HTML('<div class="divider"></div>')
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=1):
+                    gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>record_voice_over</span> Text → Saved Voice</div>")
+                    vs_tts_script = gr.Textbox(
+                        label="Script",
+                        placeholder="Type or paste the text to speak in the selected saved voice…",
+                        lines=6,
+                    )
+                    with gr.Row():
+                        vs_tts_language = gr.Dropdown(
+                            label="Language",
+                            choices=_MLX_LANGUAGE_LABELS,
+                            value="English",
+                        )
+                        vs_tts_speed = gr.Slider(
+                            label="Speech Speed",
+                            minimum=0.8,
+                            maximum=1.3,
+                            step=0.05,
+                            value=1.0,
+                        )
+                    vs_tts_pitch = gr.Slider(
+                        label="Pitch Shift (semitones)",
+                        minimum=-12,
+                        maximum=12,
+                        step=1,
+                        value=0,
+                    )
+                    vs_tts_generate_btn = gr.Button("Generate Cloned Audio", variant="primary", elem_classes=["g-btn-primary"])
+                    vs_tts_output = gr.Audio(label="Generated Audio", type="filepath", interactive=False)
+                    vs_tts_status = gr.Markdown("")
+
+                with gr.Column(scale=1):
+                    gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>swap_horiz</span> Voice → Saved Voice</div>")
+                    vs_v2v_audio = gr.Audio(
+                        label="Source Audio",
+                        type="filepath",
+                        sources=["upload"],
+                    )
+                    vs_v2v_override = gr.Textbox(
+                        label="Transcript Override (optional)",
+                        placeholder="Leave blank to transcribe the uploaded audio locally first…",
+                        lines=3,
+                    )
+                    with gr.Row():
+                        vs_v2v_language = gr.Dropdown(
+                            label="Language",
+                            choices=_MLX_LANGUAGE_LABELS,
+                            value="English",
+                        )
+                        vs_v2v_speed = gr.Slider(
+                            label="Speech Speed",
+                            minimum=0.8,
+                            maximum=1.3,
+                            step=0.05,
+                            value=1.0,
+                        )
+                    vs_v2v_pitch = gr.Slider(
+                        label="Pitch Shift (semitones)",
+                        minimum=-12,
+                        maximum=12,
+                        step=1,
+                        value=0,
+                    )
+                    vs_v2v_generate_btn = gr.Button("Convert Voice", variant="primary", elem_classes=["g-btn-primary"])
+                    vs_v2v_output = gr.Audio(label="Converted Audio", type="filepath", interactive=False)
+                    vs_v2v_transcript = gr.Textbox(label="Transcript Used", interactive=False, lines=4)
+                    vs_v2v_status = gr.Markdown("")
+
+            vs_saved_voice.change(
+                fn=get_mlx_voice_profile_details,
+                inputs=[vs_saved_voice],
+                outputs=[vs_preview, vs_meta],
+            )
+            vs_refresh_btn.click(
+                fn=refresh_mlx_voice_library,
+                inputs=[vs_saved_voice],
+                outputs=[vs_saved_voice, vs_preview, vs_meta],
+            )
+            vs_save_btn.click(
+                fn=save_mlx_voice_profile,
+                inputs=[vs_voice_name, vs_reference_audio, vs_reference_text, vs_model],
+                outputs=[vs_save_status, vs_saved_voice, vs_preview, vs_meta],
+            )
+            vs_tts_generate_btn.click(
+                fn=generate_mlx_voice_audio,
+                inputs=[vs_tts_script, vs_saved_voice, vs_model, vs_tts_language, vs_tts_speed, vs_tts_pitch],
+                outputs=[vs_tts_output, vs_tts_status],
+            )
+            vs_v2v_generate_btn.click(
+                fn=convert_mlx_voice_audio,
+                inputs=[vs_v2v_audio, vs_saved_voice, vs_v2v_override, vs_model, vs_v2v_language, vs_v2v_speed, vs_v2v_pitch],
+                outputs=[vs_v2v_output, vs_v2v_transcript, vs_v2v_status],
+            )
+
+        # ══════════════════════════════════════════════════════════════════════
+        # TAB 3: Audio to Lipsync
         # ══════════════════════════════════════════════════════════════════════
         with gr.TabItem("Audio to Lipsync", id="tab-a2l"):
             gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>lips</span> Audio → Lip-synced Video</div>")
@@ -1021,7 +1299,7 @@ with gr.Blocks(title="Avatar Studio") as demo:
             a2l_open_folder.click(fn=open_output_folder, outputs=[a2l_folder_status])
 
         # ══════════════════════════════════════════════════════════════════════
-        # TAB 3: Text to Lipsync (Full Pipeline)
+        # TAB 4: Text to Lipsync (Full Pipeline)
         # ══════════════════════════════════════════════════════════════════════
         with gr.TabItem("Text to Lipsync", id="tab-t2l"):
             gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>auto_awesome</span> Full Pipeline: Text → Video</div>")
