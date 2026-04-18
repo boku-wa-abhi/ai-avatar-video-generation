@@ -100,20 +100,14 @@ def save_uploaded_avatar(file_path: str) -> tuple[str | None, str, list]:
         AVATARS_DIR.mkdir(parents=True, exist_ok=True)
         src = Path(file_path)
         original_name = src.stem
-        img = Image.open(file_path).convert("RGB")
-        target = 512
-        ratio = min(target / img.width, target / img.height)
-        new_w = int(img.width * ratio)
-        new_h = int(img.height * ratio)
-        img = img.resize((new_w, new_h), Image.LANCZOS)
-        canvas = Image.new("RGB", (target, target), (255, 255, 255))
-        canvas.paste(img, ((target - new_w) // 2, (target - new_h) // 2))
+        img = Image.open(file_path).convert("RGBA")
+        width, height = img.width, img.height
         gallery_copy = AVATARS_DIR / f"{original_name}.png"
         if gallery_copy.name != "avatar.png":
-            canvas.save(str(gallery_copy), "PNG")
+            img.save(str(gallery_copy), "PNG")
         dest = AVATARS_DIR / "avatar.png"
-        canvas.save(str(dest), "PNG")
-        return str(dest), f"Avatar saved ({new_w}×{new_h} → 512×512)", get_avatar_gallery()
+        img.save(str(dest), "PNG")
+        return str(dest), f"Avatar saved ({width}×{height}, aspect preserved)", get_avatar_gallery()
     except Exception as e:
         return None, f"Upload failed: {e}", get_avatar_gallery()
 
@@ -132,7 +126,9 @@ def select_avatar_from_gallery(evt: gr.SelectData) -> tuple[str | None, str]:
         dest = AVATARS_DIR / "avatar.png"
         if Path(selected).resolve() != dest.resolve():
             shutil.copy(selected, str(dest))
-        return str(dest), f"Selected: {Path(selected).name}"
+        width, height = _probe_image_size(dest)
+        aspect = _aspect_ratio_code_for_image(dest) or "custom"
+        return str(dest), f"Selected: {Path(selected).name} ({width}×{height}, {aspect})"
     return None, "Selection failed."
 
 
@@ -140,6 +136,28 @@ def get_video_history() -> list[str]:
     files = glob.glob(str(OUTPUT_DIR / "*.mp4"))
     files.sort(key=os.path.getmtime, reverse=True)
     return files[:10]
+
+
+def _probe_image_size(path: str | Path) -> tuple[int, int]:
+    try:
+        with Image.open(path) as img:
+            return img.width, img.height
+    except Exception:
+        return 0, 0
+
+
+def _aspect_ratio_code_for_image(path: str | Path) -> str | None:
+    width, height = _probe_image_size(path)
+    if width <= 0 or height <= 0:
+        return None
+    ratio = width / height
+    candidates = {
+        "9:16": 9 / 16,
+        "16:9": 16 / 9,
+        "1:1": 1.0,
+    }
+    best = min(candidates.items(), key=lambda item: abs(ratio - item[1]))
+    return best[0] if abs(ratio - best[1]) <= 0.18 else None
 
 
 def open_output_folder() -> str:
@@ -324,6 +342,9 @@ def generate_video(
     voice_id = VOICE_CHOICES.get(voice_choice, "af_heart")
     orient_code = ORIENTATION_MAP.get(orientation, "9:16")
     background = str(background_file) if background_file and Path(background_file).exists() else "black"
+    avatar_aspect = _aspect_ratio_code_for_image(avatar_png)
+    if background == "black" and avatar_aspect == orient_code:
+        background = str(avatar_png)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = str(OUTPUT_DIR / f"studio_{run_id}.mp4")
     engine_map = {"MuseTalk 1.5": "musetalk", "SadTalker 256px": "sadtalker", "SadTalker HD": "sadtalker_hd"}
@@ -711,74 +732,111 @@ CSS = """
 
 /* ── Foundation ──────────────────────────────────────────────────────────── */
 :root {
-    --g-blue: #1a73e8;
-    --g-blue-light: #e8f0fe;
-    --g-blue-hover: #1765cc;
-    --g-green: #1e8e3e;
-    --g-green-light: #e6f4ea;
-    --g-red: #d93025;
-    --g-red-light: #fce8e6;
-    --g-yellow: #f9ab00;
-    --g-yellow-light: #fef7e0;
+    --g-blue: #0f6fff;
+    --g-blue-light: #e9f1ff;
+    --g-blue-hover: #0a5ee1;
+    --g-green: #0e9f6e;
+    --g-green-light: #e8fbf4;
+    --g-red: #dc3b3b;
+    --g-red-light: #fdecec;
+    --g-yellow: #f0a500;
+    --g-yellow-light: #fff5d9;
     --g-surface: #ffffff;
-    --g-surface-dim: #f8f9fa;
-    --g-surface-container: #f1f3f4;
-    --g-on-surface: #202124;
-    --g-on-surface-variant: #5f6368;
-    --g-outline: #dadce0;
-    --g-outline-variant: #e8eaed;
-    --g-elevation-1: 0 1px 2px 0 rgba(60,64,67,0.3), 0 1px 3px 1px rgba(60,64,67,0.15);
-    --g-elevation-2: 0 1px 2px 0 rgba(60,64,67,0.3), 0 2px 6px 2px rgba(60,64,67,0.15);
-    --g-elevation-3: 0 4px 8px 3px rgba(60,64,67,0.15), 0 1px 3px rgba(60,64,67,0.3);
-    --g-radius: 12px;
-    --g-radius-lg: 16px;
-    --g-radius-xl: 28px;
+    --g-surface-dim: #f4f7fb;
+    --g-surface-container: #edf2f9;
+    --g-surface-strong: #0f172a;
+    --g-on-surface: #0f172a;
+    --g-on-surface-variant: #5b667a;
+    --g-outline: #d9e1ec;
+    --g-outline-variant: #e6ebf2;
+    --g-elevation-1: 0 12px 30px rgba(15, 23, 42, 0.06);
+    --g-elevation-2: 0 18px 40px rgba(15, 23, 42, 0.09);
+    --g-elevation-3: 0 24px 60px rgba(15, 23, 42, 0.14);
+    --g-radius: 18px;
+    --g-radius-lg: 24px;
+    --g-radius-xl: 999px;
+}
+
+body {
+    background:
+        radial-gradient(circle at top left, rgba(15,111,255,0.10), transparent 24%),
+        radial-gradient(circle at top right, rgba(14,159,110,0.08), transparent 20%),
+        linear-gradient(180deg, #f7faff 0%, #eef3f9 100%) !important;
 }
 
 .gradio-container {
-    max-width: 1200px !important;
-    margin: 0 auto !important;
+    max-width: none !important;
+    width: 100% !important;
+    min-height: 100vh !important;
+    margin: 0 !important;
+    padding: 20px 28px 40px !important;
     font-family: 'Google Sans Text', 'Google Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
-    background: var(--g-surface-dim) !important;
+    background: transparent !important;
+}
+
+.gradio-container .main,
+.gradio-container .contain {
+    max-width: none !important;
+}
+
+.gradio-container .block,
+.gradio-container .form,
+.gradio-container .gr-box,
+.gradio-container .gr-group {
+    border-radius: var(--g-radius) !important;
+}
+
+.gradio-container .gr-box,
+.gradio-container .gr-group,
+.gradio-container .block.gradio-row > div,
+.gradio-container .block.gradio-column > div {
+    box-shadow: none;
 }
 
 /* ── Header ──────────────────────────────────────────────────────────────── */
 .app-header {
-    background: var(--g-surface);
-    border-radius: var(--g-radius-lg);
-    padding: 24px 32px;
-    margin-bottom: 16px;
+    background:
+        linear-gradient(135deg, rgba(255,255,255,0.96), rgba(245,249,255,0.96)),
+        var(--g-surface);
+    border-radius: 28px;
+    padding: 28px 32px;
+    margin-bottom: 22px;
     display: flex;
     align-items: center;
     gap: 20px;
-    box-shadow: var(--g-elevation-1);
-    border: 1px solid var(--g-outline-variant);
+    box-shadow: var(--g-elevation-2);
+    border: 1px solid rgba(217,225,236,0.85);
 }
 .app-header .logo-circle {
-    width: 48px; height: 48px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, #4285f4, #34a853, #fbbc04, #ea4335);
+    width: 56px; height: 56px;
+    border-radius: 18px;
+    background: linear-gradient(135deg, #0f6fff 0%, #2cc59f 100%);
     display: flex; align-items: center; justify-content: center;
     flex-shrink: 0;
-    box-shadow: 0 2px 8px rgba(66,133,244,0.3);
+    box-shadow: 0 16px 36px rgba(15,111,255,0.26);
 }
 .app-header .logo-circle .material-symbols-outlined {
-    font-size: 26px; color: white; font-variation-settings: 'FILL' 1;
+    font-size: 28px; color: white; font-variation-settings: 'FILL' 1;
 }
 .app-header h1 {
     font-family: 'Google Sans', sans-serif;
-    font-size: 1.4rem; font-weight: 600; margin: 0;
+    font-size: 1.85rem; font-weight: 700; margin: 0;
     color: var(--g-on-surface); letter-spacing: -0.01em;
 }
 .app-header .tagline {
-    color: var(--g-on-surface-variant); margin: 2px 0 0 0;
-    font-size: 0.85rem; font-weight: 400;
+    color: var(--g-on-surface-variant); margin: 4px 0 0 0;
+    font-size: 0.95rem; font-weight: 500;
 }
-.app-header .chip-row { display: flex; gap: 8px; margin-top: 10px; }
+.app-header .chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 14px;
+}
 .app-header .chip {
     display: inline-flex; align-items: center; gap: 4px;
-    padding: 4px 12px; border-radius: 16px;
-    font-size: 0.72rem; font-weight: 500;
+    padding: 7px 13px; border-radius: 999px;
+    font-size: 0.76rem; font-weight: 600;
     letter-spacing: 0.01em;
 }
 .chip-online { background: var(--g-green-light); color: var(--g-green); }
@@ -787,82 +845,124 @@ CSS = """
 
 /* ── Tab Overrides ────────────────────────────────────────────────────────── */
 .tabs > .tab-nav {
-    background: var(--g-surface) !important;
-    border-radius: var(--g-radius) var(--g-radius) 0 0 !important;
-    border-bottom: 1px solid var(--g-outline) !important;
-    box-shadow: none !important;
-    padding: 0 8px !important;
+    position: sticky;
+    top: 14px;
+    z-index: 20;
+    background: rgba(255,255,255,0.88) !important;
+    backdrop-filter: blur(18px);
+    border-radius: 24px !important;
+    border: 1px solid rgba(217,225,236,0.85) !important;
+    box-shadow: var(--g-elevation-1) !important;
+    padding: 10px !important;
+    gap: 10px !important;
+    margin-bottom: 16px !important;
 }
 .tabs > .tab-nav button {
     font-family: 'Google Sans', sans-serif !important;
-    font-weight: 500 !important;
-    font-size: 0.85rem !important;
+    font-weight: 600 !important;
+    font-size: 0.92rem !important;
     color: var(--g-on-surface-variant) !important;
-    border: none !important;
-    border-bottom: 3px solid transparent !important;
+    border: 1px solid transparent !important;
     padding: 14px 20px !important;
-    border-radius: 0 !important;
+    border-radius: 18px !important;
     transition: all 0.2s ease !important;
     letter-spacing: 0.01em !important;
+    min-height: 52px !important;
 }
 .tabs > .tab-nav button:hover {
-    background: var(--g-surface-container) !important;
-    color: var(--g-blue) !important;
+    background: #f6f9fe !important;
+    color: var(--g-on-surface) !important;
+    border-color: var(--g-outline) !important;
 }
 .tabs > .tab-nav button.selected {
-    color: var(--g-blue) !important;
-    border-bottom-color: var(--g-blue) !important;
+    color: white !important;
+    border-color: transparent !important;
     font-weight: 600 !important;
-    background: transparent !important;
+    background: linear-gradient(135deg, #0f6fff 0%, #2b86ff 100%) !important;
+    box-shadow: 0 12px 26px rgba(15,111,255,0.25) !important;
 }
 .tabitem {
-    background: var(--g-surface) !important;
-    border-radius: 0 0 var(--g-radius) var(--g-radius) !important;
-    border: 1px solid var(--g-outline-variant) !important;
-    border-top: none !important;
-    padding: 24px !important;
+    background: rgba(255,255,255,0.94) !important;
+    border-radius: 28px !important;
+    border: 1px solid rgba(217,225,236,0.82) !important;
+    padding: 28px !important;
+    box-shadow: var(--g-elevation-1) !important;
 }
 
 /* ── Section headings ────────────────────────────────────────────────────── */
 .section-title {
     font-family: 'Google Sans', sans-serif;
-    font-size: 0.7rem; font-weight: 600;
+    font-size: 0.74rem; font-weight: 700;
     text-transform: uppercase; letter-spacing: 0.08em;
     color: var(--g-on-surface-variant);
-    margin: 0 0 12px 0 ; padding: 0 0 8px 0;
+    margin: 0 0 14px 0 ; padding: 0 0 10px 0;
     border-bottom: 1px solid var(--g-outline-variant);
     display: flex; align-items: center; gap: 6px;
 }
 .section-title .material-symbols-outlined {
-    font-size: 16px; color: var(--g-blue);
+    font-size: 17px; color: var(--g-blue);
+}
+
+.gradio-container .gr-form,
+.gradio-container .form,
+.gradio-container .gr-box,
+.gradio-container .gr-group {
+    background: rgba(255,255,255,0.74) !important;
+    border: 1px solid var(--g-outline-variant) !important;
+}
+
+.gradio-container .gr-row,
+.gradio-container .gr-column {
+    gap: 18px !important;
+}
+
+.gradio-container .gr-group,
+.gradio-container .gr-box {
+    padding: 18px !important;
+}
+
+.gradio-container textarea,
+.gradio-container input,
+.gradio-container select {
+    background: #fbfdff !important;
+    border: 1px solid var(--g-outline) !important;
+    border-radius: 14px !important;
+}
+
+.gradio-container textarea:focus,
+.gradio-container input:focus,
+.gradio-container select:focus {
+    border-color: rgba(15,111,255,0.45) !important;
+    box-shadow: 0 0 0 4px rgba(15,111,255,0.10) !important;
 }
 
 /* ── Buttons ─────────────────────────────────────────────────────────────── */
 .g-btn-primary {
     font-family: 'Google Sans', sans-serif !important;
-    font-size: 14px !important; font-weight: 500 !important;
-    padding: 12px 24px !important;
-    background: var(--g-blue) !important;
+    font-size: 14px !important; font-weight: 600 !important;
+    padding: 13px 24px !important;
+    background: linear-gradient(135deg, #0f6fff 0%, #2b86ff 100%) !important;
     color: white !important;
     border: none !important;
     border-radius: var(--g-radius-xl) !important;
     letter-spacing: 0.02em !important;
     transition: all 0.2s cubic-bezier(0.4,0,0.2,1) !important;
-    box-shadow: var(--g-elevation-1) !important;
+    box-shadow: 0 14px 28px rgba(15,111,255,0.23) !important;
 }
 .g-btn-primary:hover {
-    background: var(--g-blue-hover) !important;
-    box-shadow: var(--g-elevation-2) !important;
+    background: linear-gradient(135deg, #0a5ee1 0%, #1d77f0 100%) !important;
+    box-shadow: 0 18px 32px rgba(15,111,255,0.26) !important;
+    transform: translateY(-1px);
 }
 .g-btn-danger {
     border-radius: var(--g-radius-xl) !important;
     font-family: 'Google Sans', sans-serif !important;
-    font-weight: 500 !important;
+    font-weight: 600 !important;
 }
 
 /* ── Avatar Display ──────────────────────────────────────────────────────── */
 .avatar-display img {
-    object-fit: contain !important; max-height: 240px !important;
+    object-fit: contain !important; max-height: 360px !important;
     width: 100% !important; border-radius: var(--g-radius) !important;
     background: var(--g-surface-dim) !important;
     border: 1px solid var(--g-outline-variant) !important;
@@ -870,7 +970,7 @@ CSS = """
 
 /* ── Progress Panel ──────────────────────────────────────────────────────── */
 .progress-panel {
-    background: var(--g-surface);
+    background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(247,250,255,0.94));
     border-radius: var(--g-radius);
     padding: 20px 24px;
     border: 1px solid var(--g-outline-variant);
@@ -936,6 +1036,7 @@ CSS = """
     border-radius: var(--g-radius) !important;
     overflow: hidden !important;
     border: 1px solid var(--g-outline-variant) !important;
+    box-shadow: var(--g-elevation-1) !important;
 }
 
 /* ── Metadata grid ───────────────────────────────────────────────────────── */
@@ -992,8 +1093,8 @@ CSS = """
 /* ── Separator ───────────────────────────────────────────────────────────── */
 .divider {
     height: 1px;
-    background: var(--g-outline-variant);
-    margin: 20px 0;
+    background: linear-gradient(90deg, transparent, var(--g-outline), transparent);
+    margin: 24px 0;
 }
 
 /* ── Footer hide ─────────────────────────────────────────────────────────── */
@@ -1003,10 +1104,39 @@ footer { display: none !important; }
 .gradio-container input, .gradio-container textarea,
 .gradio-container select {
     font-family: 'Google Sans Text', sans-serif !important;
-    border-radius: 8px !important;
+    border-radius: 14px !important;
 }
 .gradio-container .label-wrap {
     font-family: 'Google Sans', sans-serif !important;
+}
+
+@media (max-width: 900px) {
+    .gradio-container {
+        padding: 12px 12px 28px !important;
+    }
+
+    .app-header {
+        padding: 22px 20px;
+        border-radius: 22px;
+    }
+
+    .app-header h1 {
+        font-size: 1.45rem;
+    }
+
+    .tabs > .tab-nav {
+        top: 8px;
+        padding: 8px !important;
+    }
+
+    .tabs > .tab-nav button {
+        font-size: 0.86rem !important;
+        padding: 12px 14px !important;
+    }
+
+    .tabitem {
+        padding: 18px !important;
+    }
 }
 """
 
@@ -1221,7 +1351,7 @@ with gr.Blocks(title="Avatar Studio") as demo:
         # ══════════════════════════════════════════════════════════════════════
         with gr.TabItem("Audio to Lipsync", id="tab-a2l"):
             gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>lips</span> Audio → Lip-synced Video</div>")
-            gr.Markdown("Upload audio and an avatar image to generate a **lip-synced talking-head video**. Skips TTS — uses your audio directly.")
+            gr.Markdown("Upload audio and an avatar image to generate a **lip-synced talking-head video**. Skips TTS and now keeps the uploaded avatar's original framing instead of forcing it into a square preview.")
 
             with gr.Row(equal_height=False):
                 with gr.Column(scale=1, min_width=260):
@@ -1303,7 +1433,7 @@ with gr.Blocks(title="Avatar Studio") as demo:
         # ══════════════════════════════════════════════════════════════════════
         with gr.TabItem("Text to Lipsync", id="tab-t2l"):
             gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>auto_awesome</span> Full Pipeline: Text → Video</div>")
-            gr.Markdown("**End-to-end:** Text → Speech → Lip-sync → Enhancement → Composite → Captions → Final Video")
+            gr.Markdown("**End-to-end:** Text → Speech → Lip-sync → Enhancement → Composite → Captions → Final Video. Uploaded avatars keep their original aspect ratio so portrait art stays portrait.")
 
             with gr.Row(equal_height=False):
                 with gr.Column(scale=1, min_width=260):

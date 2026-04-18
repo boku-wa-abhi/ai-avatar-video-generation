@@ -1,0 +1,9 @@
+{
+  "name": "Elon Musk",
+  "slug": "elon-musk",
+  "created_at": "2026-04-17T15:06:37.176296+00:00",
+  "model_hint": "mlx-community/chatterbox-fp16",
+  "reference_audio_file": "reference.wav",
+  "reference_text": "Breaking: local person opened the fridge for the fourth time. Contents unchanged. Expectations also unchanged. More at 10",
+  "duration_seconds": 16.9
+}
