@@ -749,8 +749,8 @@ NARRATION_STEP_NAMES = [
     "Validate Sync",
     "Render Slides",
     "Generate Narration Audio",
-    "Build Slide Clips",
-    "Concatenate & Finalize",
+    "Build Master Audio",
+    "Encode Slideshow Video",
 ]
 
 
@@ -928,7 +928,6 @@ def generate_narration_video(
 
     n_slides = 0
     step_starts: dict[int, float] = {}
-    clip_step_started = False
     result_path: str | None = None
     report_lines = [
         f"Narrated Presentation Report",
@@ -989,16 +988,14 @@ def generate_narration_video(
                 states[2] = "active"
                 detail = msg
 
-            elif msg.startswith("Clip"):
-                if not clip_step_started:
-                    clip_step_started = True
-                    states[2] = "done"
-                    times[2] = step_time(step_starts.get(2, time.time()))
-                    states[3] = "active"
-                    step_starts[3] = time.time()
-                detail = msg
+            elif msg.startswith("Building master"):
+                states[2] = "done"
+                times[2] = step_time(step_starts.get(2, time.time()))
+                states[3] = "active"
+                step_starts[3] = time.time()
+                detail = ""
 
-            elif msg.startswith("Concatenating"):
+            elif msg.startswith("Encoding slideshow"):
                 states[3] = "done"
                 times[3] = step_time(step_starts.get(3, time.time()))
                 states[4] = "active"

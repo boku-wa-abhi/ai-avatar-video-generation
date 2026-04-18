@@ -1,20 +1,22 @@
 """
 avatarpipeline.narration.composer — Compose a narrated video from PPTX + JSON.
 
-For each slide (in order):
-  1. Display the slide image.
-  2. Play its narration audio (generated via Kokoro TTS).
-  3. Hold the slide for a configurable pause before advancing.
-
-The final output is a single MP4 file where every slide is time-locked to its
-narration.
+Pipeline (in order):
+  1. Validate sync (PPTX slide count vs JSON, sequence, range checks).
+  2. Render PPTX slides → PNG images (one per slide).
+  3. Generate TTS narration audio for every slide.
+  4. Build a master audio track: each narration followed by a silence pad,
+     all concatenated into a single WAV file.  Also compute per-slide display
+     durations (audio_duration + pause_seconds).
+  5. Encode a slideshow video in **one ffmpeg pass**: the concat-demuxer feeds
+     slide images with explicit per-image durations while the master audio is
+     muxed in — no per-clip intermediates.
 
 Public API
 ----------
 ``compose_narrated_video(pptx_path, json_data, output_path, voice, pause_seconds)``
-    Generator that yields ``(status_message: str, result_path: str | None)``
-    tuples.  The final successful yield has ``result_path`` set to the output
-    MP4.  All preceding yields have ``result_path = None``.
+    Generator that yields ``(status_message: str, result_path: str | None)``.
+    The final successful yield has ``result_path`` set to the output MP4.
 """
 from __future__ import annotations
 
@@ -27,7 +29,6 @@ from typing import Generator
 
 from loguru import logger
 
-from avatarpipeline import OUTPUT_DIR
 from .validator import validate_sync
 from .slide_renderer import render_slides
 
@@ -37,7 +38,7 @@ DEFAULT_PAUSE: float = 1.5
 # ── Low-level ffmpeg helpers ─────────────────────────────────────────────────
 
 def _audio_duration(path: str | Path) -> float:
-    """Return the duration of an audio/video file in seconds via ffprobe."""
+    """Return the duration of an audio file in seconds via ffprobe."""
     cmd = [
         "ffprobe", "-v", "quiet",
         "-print_format", "json",
@@ -55,7 +56,7 @@ def _audio_duration(path: str | Path) -> float:
 
 
 def _gen_silence(duration: float, output_path: str) -> None:
-    """Write a silent WAV of the requested length."""
+    """Write a silent 16 kHz mono WAV of the requested length."""
     cmd = [
         "ffmpeg", "-y",
         "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
@@ -69,7 +70,7 @@ def _gen_silence(duration: float, output_path: str) -> None:
 
 
 def _concat_audio(paths: list[str], output_path: str) -> None:
-    """Concatenate audio files in order using ffmpeg filter_complex."""
+    """Concatenate audio files in order using ffmpeg filter_complex concat."""
     inputs: list[str] = []
     for p in paths:
         inputs += ["-i", p]
@@ -96,16 +97,15 @@ def compose_narrated_video(
 ) -> Generator[tuple[str, str | None], None, None]:
     """Compose a narrated presentation video.
 
-    This is a **generator**.  Iterate it to drive the pipeline and receive
-    real-time status messages suitable for displaying in a progress UI.
+    This is a **generator** — iterate it to drive the pipeline and receive
+    real-time status messages for display in a progress UI.
 
     Yields:
-        ``(message, result_path)`` where ``result_path`` is ``None`` for all
-        progress messages and the final output MP4 path on completion.
+        ``(message, result_path)`` tuples.  ``result_path`` is ``None`` for all
+        progress messages and the final output MP4 path on success.
 
     Raises:
-        :class:`ValueError`  — when validation fails (errors surfaced via message
-                               before raising).
+        :class:`ValueError`   — when sync validation fails.
         :class:`RuntimeError` — when an ffmpeg step fails.
     """
     pptx_path = Path(pptx_path)
@@ -124,7 +124,7 @@ def compose_narrated_video(
             raise ValueError("Validation failed:\n" + "\n".join(result.errors))
         yield f"Validation passed — {result.slide_count} slides ✓", None
 
-        # ── Step 2: Render slides ────────────────────────────────────────────
+        # ── Step 2: Render slides → PNG ──────────────────────────────────────
         yield "Rendering slides…", None
         slides_dir = work_dir / "slides"
         slide_images = render_slides(pptx_path, slides_dir)
@@ -135,7 +135,7 @@ def compose_narrated_video(
             )
         yield f"Slides rendered ({len(slide_images)} images)", None
 
-        # ── Step 3: TTS per slide ────────────────────────────────────────────
+        # ── Step 3: TTS — generate narration audio for every slide ───────────
         yield "Loading TTS engine…", None
         from avatarpipeline.voice.kokoro import VoiceGenerator
         vg = VoiceGenerator()
@@ -144,7 +144,7 @@ def compose_narrated_video(
         audio_dir = work_dir / "audio"
         audio_dir.mkdir(exist_ok=True)
 
-        audio_paths: list[str] = []
+        narr_paths: list[str] = []
         n = len(entries)
         for idx, entry in enumerate(entries):
             slide_num = int(entry["slide_number"])
@@ -154,66 +154,71 @@ def compose_narrated_video(
                 vg.generate(narration, voice=voice, out_path=out_wav)
             else:
                 _gen_silence(0.5, out_wav)
-            audio_paths.append(out_wav)
+            narr_paths.append(out_wav)
             yield f"TTS {idx + 1}/{n}: slide {slide_num}", None
 
-        # ── Step 4: Build per-slide video clips ──────────────────────────────
-        clips_dir = work_dir / "clips"
-        clips_dir.mkdir(exist_ok=True)
-        clip_paths: list[str] = []
+        # ── Step 4: Build master audio track ─────────────────────────────────
+        # Each narration is padded with a silence tail (= pause_seconds),
+        # then all padded segments are concatenated into one master WAV.
+        # We also record the total display duration per slide for the image
+        # concat demuxer in step 5.
+        yield "Building master audio…", None
 
-        for idx, (slide_img, audio_wav) in enumerate(zip(slide_images, audio_paths)):
+        padded_dir = work_dir / "padded"
+        padded_dir.mkdir(exist_ok=True)
+        padded_paths: list[str] = []
+        slide_durations: list[float] = []
+
+        for idx, narr_wav in enumerate(narr_paths):
             slide_num = idx + 1
-            audio_dur = _audio_duration(audio_wav)
+            audio_dur = _audio_duration(narr_wav)
             total_dur = audio_dur + pause_seconds
+            slide_durations.append(total_dur)
 
-            # Append pause silence to the narration audio
-            pad_wav = str(clips_dir / f"pad_{slide_num:03d}.wav")
-            padded_wav = str(clips_dir / f"padded_{slide_num:03d}.wav")
+            pad_wav = str(padded_dir / f"pad_{slide_num:03d}.wav")
+            padded_wav = str(padded_dir / f"padded_{slide_num:03d}.wav")
             _gen_silence(pause_seconds, pad_wav)
-            _concat_audio([audio_wav, pad_wav], padded_wav)
+            _concat_audio([narr_wav, pad_wav], padded_wav)
+            padded_paths.append(padded_wav)
 
-            clip_path = str(clips_dir / f"clip_{slide_num:03d}.mp4")
-            cmd = [
-                "ffmpeg", "-y",
-                "-loop", "1", "-i", str(slide_img),
-                "-i", padded_wav,
-                "-c:v", "libx264", "-tune", "stillimage",
-                "-c:a", "aac", "-b:a", "128k",
-                "-pix_fmt", "yuv420p",
-                "-t", str(total_dur),
-                "-vf", (
-                    "scale=1920:1080:force_original_aspect_ratio=decrease,"
-                    "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black"
-                ),
-                "-shortest",
-                clip_path,
-            ]
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            if r.returncode != 0:
-                raise RuntimeError(f"FFmpeg clip {slide_num} failed:\n{r.stderr[-600:]}")
-            clip_paths.append(clip_path)
-            yield f"Clip {idx + 1}/{n}: slide {slide_num} encoded", None
+        master_audio = str(work_dir / "master.wav")
+        _concat_audio(padded_paths, master_audio)
+        logger.debug(
+            f"Master audio built: {sum(slide_durations):.1f}s total, "
+            f"{len(slide_durations)} slides"
+        )
 
-        # ── Step 5: Concatenate ──────────────────────────────────────────────
-        yield "Concatenating clips…", None
-        concat_txt = work_dir / "concat.txt"
-        with open(concat_txt, "w") as f:
-            for cp in clip_paths:
-                f.write(f"file '{cp}'\n")
+        # ── Step 5: Encode slideshow video — one ffmpeg pass ─────────────────
+        # ffmpeg concat demuxer: each slide PNG shown for its computed duration,
+        # master audio muxed in.  No per-clip intermediates.
+        yield "Encoding slideshow video…", None
+
+        images_txt = work_dir / "images.txt"
+        with open(images_txt, "w") as f:
+            for img, dur in zip(slide_images, slide_durations):
+                f.write(f"file '{img}'\n")
+                f.write(f"duration {dur:.4f}\n")
+            # ffmpeg image-concat quirk: list the last frame a second time
+            # so the duration of the penultimate entry is honoured correctly.
+            f.write(f"file '{slide_images[-1]}'\n")
 
         cmd = [
             "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", str(concat_txt),
-            "-c:v", "libx264",
+            "-f", "concat", "-safe", "0", "-i", str(images_txt),
+            "-i", master_audio,
+            "-vf", (
+                "scale=1920:1080:force_original_aspect_ratio=decrease,"
+                "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black"
+            ),
+            "-c:v", "libx264", "-tune", "stillimage",
             "-c:a", "aac", "-b:a", "128k",
             "-pix_fmt", "yuv420p",
+            "-shortest",
             str(output_path),
         ]
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
-            raise RuntimeError(f"FFmpeg concatenation failed:\n{r.stderr[-600:]}")
+            raise RuntimeError(f"FFmpeg slideshow encode failed:\n{r.stderr[-600:]}")
 
         logger.info(f"Narrated video saved: {output_path}")
         yield "Done!", str(output_path)
