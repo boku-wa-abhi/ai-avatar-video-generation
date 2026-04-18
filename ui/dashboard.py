@@ -39,6 +39,16 @@ from avatarpipeline import (
     OUTPUT_DIR,
 )
 from avatarpipeline.voice.mlx_voice import MlxVoiceStudio
+from avatarpipeline.podcast.composer import (
+    LAYOUT_CHOICES as PODCAST_LAYOUTS,
+    OVERLAY_CHOICES as PODCAST_OVERLAYS,
+    compose_podcast_video,
+    generate_per_speaker_audio,
+    get_unique_speakers,
+    mix_audio_tracks,
+    parse_podcast_script,
+    resample_16k,
+)
 
 CONFIG_PATH = ROOT / "configs" / "settings.yaml"
 ENV_PATH    = ROOT / ".env"
@@ -714,6 +724,267 @@ _MLX_INITIAL_PREVIEW, _MLX_INITIAL_SUMMARY = get_mlx_voice_profile_details(_MLX_
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Podcast helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+PODCAST_STEP_NAMES = [
+    "Prepare Audio Tracks",
+    "Lip-sync Speaker A",
+    "Lip-sync Speaker B",
+    "Compose Podcast Video",
+    "Finalize",
+]
+
+
+def save_podcast_avatar(file_path: str | None, speaker_id: str) -> str:
+    """Save an uploaded avatar for podcast speaker A or B."""
+    if not file_path:
+        return "No file selected."
+    try:
+        AVATARS_DIR.mkdir(parents=True, exist_ok=True)
+        dest = AVATARS_DIR / f"podcast_{speaker_id}.png"
+        img = Image.open(file_path).convert("RGBA")
+        img.save(str(dest), "PNG")
+        return f"Avatar set ({img.width}\u00d7{img.height})"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _save_pod_avatar_a(f):
+    return save_podcast_avatar(f, "a")
+
+
+def _save_pod_avatar_b(f):
+    return save_podcast_avatar(f, "b")
+
+
+def _run_podcast_lipsync(
+    avatar_path, audio_path, output_path, engine_key,
+    mt_batch_size, mt_bbox_shift,
+    st_expression_scale, st_pose_style, st_still, st_preprocess,
+):
+    """Run lip-sync for one podcast speaker."""
+    if engine_key in ("sadtalker", "sadtalker_hd"):
+        from avatarpipeline.lipsync.sadtalker import SadTalkerInference
+        st = SadTalkerInference(preset=engine_key)
+        return st.run(
+            avatar_path, audio_path, output_path=output_path,
+            expression_scale=st_expression_scale, pose_style=st_pose_style,
+            still=st_still, preprocess=st_preprocess,
+        )
+    else:
+        from avatarpipeline.lipsync.musetalk import MuseTalkInference
+        ms = MuseTalkInference()
+        ms.prepare_avatar(avatar_path)
+        return ms.run(
+            avatar_path, audio_path,
+            batch_size=mt_batch_size, bbox_shift=mt_bbox_shift,
+        )
+
+
+def _build_podcast_progress_html(step_states, step_times, pct, elapsed, engine="", message=""):
+    """Build progress panel HTML for the podcast pipeline."""
+    rows = []
+    for i, (name, state, t) in enumerate(zip(PODCAST_STEP_NAMES, step_states, step_times)):
+        icon_name, css_cls = _STEP_ICONS[state]
+        label = f"{name} \u2014 {engine}" if i in (1, 2) and engine else name
+        rows.append(
+            f'<div class="step-row {css_cls}">'
+            f'<span class="material-symbols-outlined step-icon-m">{icon_name}</span>'
+            f'<span class="step-name">{label}</span>'
+            f'<span class="step-time-val">{t}</span>'
+            f'</div>'
+        )
+    bar_pct = max(0, min(100, int(pct * 100)))
+    footer = f'<div class="progress-message">{message}</div>' if message else ""
+    return (
+        f'<div class="progress-panel">'
+        f'<div class="progress-header"><span class="material-symbols-outlined">podcasts</span> Podcast Progress</div>'
+        f'{"".join(rows)}'
+        f'<div class="progress-track"><div class="progress-fill" style="width:{bar_pct}%"></div></div>'
+        f'<div class="progress-elapsed">{elapsed}</div>'
+        f'{footer}'
+        f'</div>'
+    )
+
+
+def generate_podcast(
+    mode, script, audio_a, audio_b,
+    voice_a, voice_b,
+    layout, overlay, custom_overlay,
+    orientation, lipsync_engine,
+    mt_batch_size=8, mt_bbox_shift=0,
+    st_expression_scale=1.0, st_pose_style=0, st_still=True, st_preprocess="full",
+    progress=gr.Progress(track_tqdm=False),
+):
+    """Generate a two-speaker podcast video.  Yields ``(video, progress_html, metadata_html)``."""
+    _cancel_event.clear()
+    wall_start = time.time()
+    TOTAL = 5
+    states = ["waiting"] * TOTAL
+    times = [""] * TOTAL
+    engine_label = lipsync_engine
+
+    def elapsed_str():
+        s = int(time.time() - wall_start)
+        return f"{s // 60}m {s % 60:02d}s"
+
+    def step_time(t0):
+        d = time.time() - t0
+        return f"{d:.1f}s" if d < 60 else f"{int(d)//60}m {int(d)%60}s"
+
+    def render(pct, msg=""):
+        return _build_podcast_progress_html(states, times, pct, elapsed_str(), engine_label, msg)
+
+    # Validate avatars
+    avatar_a = AVATARS_DIR / "podcast_a.png"
+    avatar_b = AVATARS_DIR / "podcast_b.png"
+    if not avatar_a.exists():
+        states[0] = "error"
+        yield None, render(0, "Upload an avatar for Speaker A."), ""
+        return
+    if not avatar_b.exists():
+        states[0] = "error"
+        yield None, render(0, "Upload an avatar for Speaker B."), ""
+        return
+
+    orient_code = ORIENTATION_MAP.get(orientation, "16:9")
+    engine_map = {"MuseTalk 1.5": "musetalk", "SadTalker 256px": "sadtalker", "SadTalker HD": "sadtalker_hd"}
+    engine_key = engine_map.get(lipsync_engine, "musetalk")
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    work_dir = ROOT / "data" / "temp" / "podcast" / run_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    output_path = str(OUTPUT_DIR / f"podcast_{run_id}.mp4")
+
+    try:
+        # ── Step 1: Prepare audio ────────────────────────────────────
+        states[0] = "active"
+        progress(1 / TOTAL, desc="Step 1/5: Preparing audio tracks")
+        yield None, render(1 / TOTAL), ""
+        t0 = time.time()
+
+        if mode == "Script":
+            if not script or not script.strip():
+                states[0] = "error"
+                yield None, render(0, "Enter a podcast script with [Speaker]: markers."), ""
+                return
+
+            segments = parse_podcast_script(script)
+            speakers = get_unique_speakers(segments)
+            if len(speakers) < 2:
+                states[0] = "error"
+                found = ", ".join(speakers) if speakers else "none"
+                yield None, render(0, f"Need at least 2 speakers (found: {found}). Use [Name]: format."), ""
+                return
+
+            voice_a_id = VOICE_CHOICES.get(voice_a, "af_heart")
+            voice_b_id = VOICE_CHOICES.get(voice_b, "am_adam")
+            voice_map = {speakers[0]: voice_a_id, speakers[1]: voice_b_id}
+
+            master_audio, speaker_tracks, _timeline = generate_per_speaker_audio(
+                segments, speakers, voice_map, work_dir,
+            )
+            track_a = speaker_tracks[speakers[0]]
+            track_b = speaker_tracks[speakers[1]]
+        else:
+            # Audio upload mode
+            if not audio_a or not Path(audio_a).exists():
+                states[0] = "error"
+                yield None, render(0, "Upload audio for Speaker A."), ""
+                return
+            if not audio_b or not Path(audio_b).exists():
+                states[0] = "error"
+                yield None, render(0, "Upload audio for Speaker B."), ""
+                return
+
+            track_a = str(work_dir / "track_a_16k.wav")
+            track_b = str(work_dir / "track_b_16k.wav")
+            resample_16k(audio_a, track_a)
+            resample_16k(audio_b, track_b)
+            master_audio = str(work_dir / "master_audio.wav")
+            mix_audio_tracks([track_a, track_b], master_audio)
+
+        states[0] = "done"; times[0] = step_time(t0)
+        yield None, render(1 / TOTAL), ""
+
+        # ── Step 2: Lip-sync Speaker A ──────────────────────────────
+        if _cancel_event.is_set():
+            yield None, render(1 / TOTAL, "Cancelled."), ""; return
+        states[1] = "active"
+        progress(2 / TOTAL, desc="Step 2/5: Lip-sync Speaker A")
+        yield None, render(2 / TOTAL), ""
+        t0 = time.time()
+
+        lipsync_a = _run_podcast_lipsync(
+            str(avatar_a), track_a, str(work_dir / "lipsync_a.mp4"), engine_key,
+            mt_batch_size, mt_bbox_shift,
+            st_expression_scale, st_pose_style, st_still, st_preprocess,
+        )
+        states[1] = "done"; times[1] = step_time(t0)
+        yield None, render(2 / TOTAL), ""
+
+        # ── Step 3: Lip-sync Speaker B ──────────────────────────────
+        if _cancel_event.is_set():
+            yield None, render(2 / TOTAL, "Cancelled."), ""; return
+        states[2] = "active"
+        progress(3 / TOTAL, desc="Step 3/5: Lip-sync Speaker B")
+        yield None, render(3 / TOTAL), ""
+        t0 = time.time()
+
+        lipsync_b = _run_podcast_lipsync(
+            str(avatar_b), track_b, str(work_dir / "lipsync_b.mp4"), engine_key,
+            mt_batch_size, mt_bbox_shift,
+            st_expression_scale, st_pose_style, st_still, st_preprocess,
+        )
+        states[2] = "done"; times[2] = step_time(t0)
+        yield None, render(3 / TOTAL), ""
+
+        # ── Step 4: Compose ─────────────────────────────────────────
+        if _cancel_event.is_set():
+            yield None, render(3 / TOTAL, "Cancelled."), ""; return
+        states[3] = "active"
+        progress(4 / TOTAL, desc="Step 4/5: Composing podcast")
+        yield None, render(4 / TOTAL), ""
+        t0 = time.time()
+
+        overlay_file = None
+        if custom_overlay:
+            try:
+                co = str(custom_overlay)
+                if Path(co).exists():
+                    overlay_file = co
+            except Exception:
+                pass
+
+        compose_podcast_video(
+            lipsync_a, lipsync_b, master_audio, output_path,
+            layout=layout, overlay=overlay,
+            custom_overlay_path=overlay_file,
+            orientation=orient_code,
+        )
+        states[3] = "done"; times[3] = step_time(t0)
+        yield None, render(4 / TOTAL), ""
+
+        # ── Step 5: Finalize ────────────────────────────────────────
+        states[4] = "done"; times[4] = "\u2014"
+        wall_secs = time.time() - wall_start
+        m, s = int(wall_secs) // 60, int(wall_secs) % 60
+        progress(1.0, desc="Done!")
+        yield (
+            output_path,
+            render(1.0, f"Podcast complete in {m}m {s:02d}s"),
+            get_video_metadata(output_path, wall_secs),
+        )
+
+    except Exception as exc:
+        for i, st in enumerate(states):
+            if st == "active":
+                states[i] = "error"; break
+        logger.error(f"Podcast pipeline error: {exc}")
+        yield None, render(0, f"Error: {exc}"), ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Logo
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1138,6 +1409,32 @@ footer { display: none !important; }
         padding: 18px !important;
     }
 }
+
+/* ── Podcast tab ─────────────────────────────────────────────────────────── */
+.podcast-speaker-label {
+    font-family: 'Google Sans', sans-serif;
+    font-size: 0.82rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border-radius: 12px;
+    margin-bottom: 10px;
+}
+.podcast-speaker-label .material-symbols-outlined {
+    font-size: 18px;
+}
+.speaker-a-label {
+    background: var(--g-blue-light);
+    color: var(--g-blue);
+    border-left: 3px solid var(--g-blue);
+}
+.speaker-b-label {
+    background: var(--g-green-light);
+    color: var(--g-green);
+    border-left: 3px solid var(--g-green);
+}
 """
 
 
@@ -1524,6 +1821,221 @@ with gr.Blocks(title="Avatar Studio") as demo:
             )
             t2l_cancel_btn.click(fn=cancel_generation, outputs=[t2l_log])
             t2l_open_folder.click(fn=open_output_folder, outputs=[t2l_folder_status])
+
+        # ══════════════════════════════════════════════════════════════════════
+        # TAB 5: Podcast Studio
+        # ══════════════════════════════════════════════════════════════════════
+        with gr.TabItem("Podcast Studio", id="tab-podcast"):
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>podcasts</span> Two-Speaker Podcast Generator</div>")
+            gr.Markdown(
+                "Create a **two-speaker podcast video** with animated avatars. "
+                "Write a script with `[Speaker A]:` / `[Speaker B]:` markers, or upload separate audio for each speaker. "
+                "Choose a frame layout, add visual overlays, and generate!"
+            )
+
+            # ── Speakers ────────────────────────────────────────────────
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>group</span> Speakers</div>")
+            with gr.Row(equal_height=True):
+                with gr.Column(scale=1):
+                    gr.HTML("<div class='podcast-speaker-label speaker-a-label'><span class='material-symbols-outlined'>person</span> Speaker A</div>")
+                    pod_avatar_a_upload = gr.Image(
+                        label="Avatar A", type="filepath",
+                        sources=["upload", "clipboard"], height=160,
+                        elem_classes=["avatar-display"],
+                    )
+                    pod_avatar_a_status = gr.Textbox(
+                        interactive=False, lines=1, show_label=False,
+                        value="Avatar set" if (AVATARS_DIR / "podcast_a.png").exists() else "No avatar",
+                    )
+                    pod_voice_a = gr.Dropdown(
+                        label="Voice (script mode)",
+                        choices=list(VOICE_CHOICES.keys()),
+                        value="Heart \u2014 Warm Female (default)",
+                    )
+                    pod_audio_a = gr.Audio(
+                        label="Audio A (upload mode)", type="filepath",
+                        sources=["upload"], visible=False,
+                    )
+
+                with gr.Column(scale=1):
+                    gr.HTML("<div class='podcast-speaker-label speaker-b-label'><span class='material-symbols-outlined'>person</span> Speaker B</div>")
+                    pod_avatar_b_upload = gr.Image(
+                        label="Avatar B", type="filepath",
+                        sources=["upload", "clipboard"], height=160,
+                        elem_classes=["avatar-display"],
+                    )
+                    pod_avatar_b_status = gr.Textbox(
+                        interactive=False, lines=1, show_label=False,
+                        value="Avatar set" if (AVATARS_DIR / "podcast_b.png").exists() else "No avatar",
+                    )
+                    pod_voice_b = gr.Dropdown(
+                        label="Voice (script mode)",
+                        choices=list(VOICE_CHOICES.keys()),
+                        value="Adam \u2014 Deep Male",
+                    )
+                    pod_audio_b = gr.Audio(
+                        label="Audio B (upload mode)", type="filepath",
+                        sources=["upload"], visible=False,
+                    )
+
+            gr.HTML('<div class="divider"></div>')
+
+            # ── Input mode ──────────────────────────────────────────────
+            pod_mode = gr.Radio(
+                label="Input Mode",
+                choices=["Script", "Upload Audio"],
+                value="Script",
+            )
+
+            with gr.Column(visible=True) as pod_script_section:
+                pod_script = gr.Textbox(
+                    label="Podcast Script",
+                    placeholder=(
+                        "[Host]: Welcome to our AI podcast! Today we're discussing the future of technology.\n"
+                        "[Guest]: Thanks for having me. It's an exciting time!\n"
+                        "[Host]: Let's dive right in."
+                    ),
+                    lines=8,
+                )
+
+            with gr.Column(visible=False) as pod_audio_section:
+                gr.Markdown(
+                    "Upload separate audio files for each speaker above. "
+                    "Each file should contain only that speaker's parts "
+                    "(with silence during the other speaker's turns)."
+                )
+
+            gr.HTML('<div class="divider"></div>')
+
+            # ── Layout & Effects ────────────────────────────────────────
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>grid_view</span> Layout & Effects</div>")
+            with gr.Row():
+                pod_layout = gr.Radio(
+                    label="Frame Layout",
+                    choices=PODCAST_LAYOUTS,
+                    value="Split Screen",
+                    scale=2,
+                )
+                pod_orientation = gr.Radio(
+                    label="Orientation",
+                    choices=list(ORIENTATION_MAP.keys()),
+                    value="Landscape 16:9",
+                    scale=2,
+                )
+            with gr.Row():
+                pod_overlay = gr.Dropdown(
+                    label="Visual Overlay",
+                    choices=PODCAST_OVERLAYS,
+                    value="None",
+                    scale=2,
+                )
+                pod_custom_overlay = gr.File(
+                    label="Custom Overlay (transparent PNG)",
+                    file_types=["image"],
+                    scale=2,
+                )
+
+            with gr.Accordion("Advanced Options", open=False):
+                pod_engine = gr.Radio(
+                    label="Lip-sync Engine",
+                    choices=["MuseTalk 1.5", "SadTalker 256px", "SadTalker HD"],
+                    value="MuseTalk 1.5",
+                )
+                with gr.Column(visible=True) as pod_mt_params:
+                    with gr.Row():
+                        pod_mt_batch = gr.Slider(label="Batch Size", minimum=1, maximum=16, step=1, value=8)
+                        pod_mt_bbox = gr.Slider(label="Lip Region Shift", minimum=-10, maximum=10, step=1, value=0)
+                with gr.Column(visible=False) as pod_st_params:
+                    with gr.Row():
+                        pod_st_expr = gr.Slider(label="Expression Scale", minimum=0.5, maximum=3.0, step=0.1, value=1.0)
+                        pod_st_pose = gr.Slider(label="Pose Style", minimum=0, maximum=45, step=1, value=0)
+                    with gr.Row():
+                        pod_st_still = gr.Checkbox(label="Still mode", value=True)
+                        pod_st_preprocess = gr.Dropdown(
+                            label="Preprocess",
+                            choices=["crop", "extcrop", "resize", "full", "extfull"],
+                            value="full",
+                        )
+
+            gr.HTML('<div class="divider"></div>')
+
+            with gr.Row():
+                pod_generate_btn = gr.Button(
+                    "Generate Podcast", variant="primary", scale=3,
+                    elem_classes=["g-btn-primary"],
+                )
+                pod_cancel_btn = gr.Button(
+                    "Cancel", variant="stop", scale=1,
+                    elem_classes=["g-btn-danger"],
+                )
+
+            pod_log = gr.HTML(
+                value=(
+                    "<div class='progress-panel'>"
+                    "<div class='progress-header'>"
+                    "<span class='material-symbols-outlined'>podcasts</span> Podcast Progress"
+                    "</div>"
+                    "<div style='color:var(--g-on-surface-variant);font-size:0.85rem;padding:12px 0'>"
+                    "Ready \u2014 set up speakers and click Generate"
+                    "</div></div>"
+                )
+            )
+
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>movie</span> Output</div>")
+            with gr.Row():
+                pod_output = gr.Video(label="Generated Podcast", elem_classes=["output-video"], scale=3)
+                with gr.Column(scale=1):
+                    pod_metadata = gr.HTML(value="")
+                    pod_open_folder = gr.Button("Open Output Folder", size="sm")
+                    pod_folder_status = gr.Textbox(visible=False)
+
+            # ── Events ──────────────────────────────────────────────────
+            def _podcast_mode_toggle(mode):
+                is_script = mode == "Script"
+                return (
+                    gr.update(visible=is_script),       # script section
+                    gr.update(visible=not is_script),   # audio section
+                    gr.update(visible=is_script),       # voice A
+                    gr.update(visible=is_script),       # voice B
+                    gr.update(visible=not is_script),   # audio A
+                    gr.update(visible=not is_script),   # audio B
+                )
+
+            pod_mode.change(
+                fn=_podcast_mode_toggle,
+                inputs=[pod_mode],
+                outputs=[pod_script_section, pod_audio_section,
+                         pod_voice_a, pod_voice_b, pod_audio_a, pod_audio_b],
+            )
+            pod_avatar_a_upload.change(
+                fn=_save_pod_avatar_a,
+                inputs=[pod_avatar_a_upload],
+                outputs=[pod_avatar_a_status],
+            )
+            pod_avatar_b_upload.change(
+                fn=_save_pod_avatar_b,
+                inputs=[pod_avatar_b_upload],
+                outputs=[pod_avatar_b_status],
+            )
+            pod_engine.change(
+                fn=_toggle_lipsync_params,
+                inputs=[pod_engine],
+                outputs=[pod_mt_params, pod_st_params],
+            )
+            pod_generate_btn.click(
+                fn=generate_podcast,
+                inputs=[
+                    pod_mode, pod_script, pod_audio_a, pod_audio_b,
+                    pod_voice_a, pod_voice_b,
+                    pod_layout, pod_overlay, pod_custom_overlay,
+                    pod_orientation, pod_engine,
+                    pod_mt_batch, pod_mt_bbox,
+                    pod_st_expr, pod_st_pose, pod_st_still, pod_st_preprocess,
+                ],
+                outputs=[pod_output, pod_log, pod_metadata],
+            )
+            pod_cancel_btn.click(fn=cancel_generation, outputs=[pod_log])
+            pod_open_folder.click(fn=open_output_folder, outputs=[pod_folder_status])
 
     # ── Settings ─────────────────────────────────────────────────────────────
     with gr.Accordion("Settings", open=False):
