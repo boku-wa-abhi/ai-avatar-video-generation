@@ -803,22 +803,22 @@ def _narration_validation_html(
     elif warnings:
         css_cls = "narr-validation-warn"
         header_icon = "warning"
-        header_text = f"Validation Passed with warnings — {slide_count} slides"
+        header_text = f"Validation Passed with warnings — {slide_count} pages"
     else:
         css_cls = "narr-validation-pass"
         header_icon = "check_circle"
-        header_text = f"All checks passed — {slide_count} slides ready"
+        header_text = f"All checks passed — {slide_count} pages ready"
 
     rows: list[str] = []
-    count_error = any("ppt has" in e.lower() and "json has" in e.lower() for e in errors)
+    count_error = any("pdf has" in e.lower() and "json has" in e.lower() for e in errors)
     sequence_error = any("not sequential" in e.lower() or "slide_number" in e.lower() for e in errors)
     range_error = any("only has" in e.lower() for e in errors)
 
     check_labels = [
-        ("Slide count match", not count_error,
-         f"PPT has {slide_count} slides, JSON has {json_count} entries"),
-        ("Slide number sequence", not sequence_error, "Checked"),
-        ("Slide numbers in range", not range_error, "Checked"),
+        ("Page count match", not count_error,
+         f"PDF has {slide_count} pages, JSON has {json_count} entries"),
+        ("JSON slide number sequence", not sequence_error, "Checked"),
+        ("JSON slide numbers in range", not range_error, "Checked"),
     ]
     for label, _pass, detail in check_labels:
         icon = "check_circle" if _pass else "cancel"
@@ -852,10 +852,10 @@ def _narration_validation_html(
     )
 
 
-def validate_narration_files(pptx_file: str | None, json_file: str | None) -> str:
+def validate_narration_files(pdf_file: str | None, json_file: str | None) -> str:
     """Run sync validation and return a styled HTML report."""
-    if not pptx_file:
-        return _narration_validation_html(False, ["No PPTX file uploaded."], [])
+    if not pdf_file:
+        return _narration_validation_html(False, ["No PDF file uploaded."], [])
     if not json_file:
         return _narration_validation_html(False, ["No JSON narration file uploaded."], [])
     try:
@@ -865,7 +865,7 @@ def validate_narration_files(pptx_file: str | None, json_file: str | None) -> st
         return _narration_validation_html(False, [f"Cannot parse JSON file: {exc}"], [])
 
     try:
-        result = _narration_validate(pptx_file, json_data)
+        result = _narration_validate(pdf_file, json_data)
     except Exception as exc:
         return _narration_validation_html(False, [f"Validation error: {exc}"], [])
 
@@ -879,7 +879,7 @@ def validate_narration_files(pptx_file: str | None, json_file: str | None) -> st
 
 
 def generate_narration_video(
-    pptx_file: str | None,
+    pdf_file: str | None,
     json_file: str | None,
     voice_choice: str,
     pause_secs: float,
@@ -908,9 +908,9 @@ def generate_narration_video(
         return _build_narration_progress_html(states, times, pct, elapsed_str(), detail, msg)
 
     # ── Input validation ─────────────────────────────────────────────────────
-    if not pptx_file:
+    if not pdf_file:
         states[0] = "error"
-        yield None, render(0, "Upload a PPTX file."), ""
+        yield None, render(0, "Upload a PDF file."), ""
         return
     if not json_file:
         states[0] = "error"
@@ -935,7 +935,7 @@ def generate_narration_video(
     report_lines = [
         f"Narrated Presentation Report",
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"PPT: {Path(pptx_file).name}",
+        f"PDF: {Path(pdf_file).name}",
         f"JSON: {Path(json_file).name}",
         f"Voice: {voice_choice}",
         f"Default pause between slides: {pause_secs}s",
@@ -943,7 +943,7 @@ def generate_narration_video(
 
     try:
         gen = compose_narrated_video(
-            pptx_path=pptx_file,
+            pdf_path=pdf_file,
             json_data=json_data,
             output_path=output_path,
             voice=voice_id,
@@ -967,7 +967,7 @@ def generate_narration_video(
                     n_slides = int([t for t in msg.split() if t.isdigit()][0])
                 except (IndexError, ValueError):
                     n_slides = 0
-                report_lines.append(f"Slides: {n_slides}")
+                report_lines.append(f"Pages: {n_slides}")
                 states[1] = "active"
                 step_starts[1] = time.time()
 
@@ -2412,12 +2412,12 @@ with gr.Blocks(title="Avatar Studio") as demo:
             gr.HTML(
                 "<div class='section-title'>"
                 "<span class='material-symbols-outlined'>slideshow</span>"
-                " PPT + JSON Narration Sync Tool</div>"
+                " PDF + JSON Narration Sync Tool</div>"
             )
             gr.Markdown(
-                "Upload a **PowerPoint** file and a **JSON narration** file. "
+                "Upload a **PDF** file and a **JSON narration** file. "
                 "The tool validates that they are in sync, generates the narration audio first, "
-                "then renders a narrated video where each slide stays on screen for the generated "
+                "then renders a narrated video where each page stays on screen for the generated "
                 "audio length or any longer timing you specify in JSON, followed by an optional pause."
             )
 
@@ -2425,9 +2425,9 @@ with gr.Blocks(title="Avatar Studio") as demo:
             gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>upload_file</span> Inputs</div>")
             with gr.Row(equal_height=False):
                 with gr.Column(scale=1):
-                    narr_pptx = gr.File(
-                        label="PowerPoint File (.pptx)",
-                        file_types=[".pptx"],
+                    narr_pdf = gr.File(
+                        label="PDF File (.pdf)",
+                        file_types=[".pdf"],
                         file_count="single",
                     )
                 with gr.Column(scale=1):
@@ -2443,7 +2443,7 @@ with gr.Blocks(title="Avatar Studio") as demo:
                 "\"slides\": [{\"slide_number\": 1, \"narration\": \"…\", \"duration_seconds\": 6, "
                 "\"pause_seconds\": 0.5}, …]}</code><br>"
                 "Also accepted: plain slide arrays, <code>text</code>/<code>script</code> instead of "
-                "<code>narration</code>, and omitted <code>slide_number</code> fields when the JSON order matches the deck."
+                "<code>narration</code>, and omitted <code>slide_number</code> fields when the JSON order matches the PDF page order."
                 "</div>"
             )
 
@@ -2525,12 +2525,12 @@ with gr.Blocks(title="Avatar Studio") as demo:
             # ── Wiring ───────────────────────────────────────────────────────
             narr_validate_btn.click(
                 fn=validate_narration_files,
-                inputs=[narr_pptx, narr_json],
+                inputs=[narr_pdf, narr_json],
                 outputs=[narr_validation_result],
             )
             narr_generate_btn.click(
                 fn=generate_narration_video,
-                inputs=[narr_pptx, narr_json, narr_voice, narr_pause],
+                inputs=[narr_pdf, narr_json, narr_voice, narr_pause],
                 outputs=[narr_output, narr_log, narr_report],
             )
             narr_cancel_btn.click(fn=cancel_generation, outputs=[narr_log])

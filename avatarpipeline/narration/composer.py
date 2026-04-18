@@ -1,20 +1,20 @@
 """
-avatarpipeline.narration.composer — Compose a narrated video from PPTX + JSON.
+avatarpipeline.narration.composer — Compose a narrated video from PDF + JSON.
 
 Pipeline (in order):
-  1. Validate sync (PPTX slide count vs JSON, sequence, range checks).
+  1. Validate sync (PDF page count vs JSON, sequence, range checks).
   2. Generate TTS narration audio for every slide.
   3. Build a master audio track: each narration followed by a silence pad,
      all concatenated into a single WAV file.  Also compute per-slide display
      durations from the generated audio plus any JSON timing overrides.
-  4. Render PPTX slides → PNG images (one per slide).
+  4. Render PDF pages → PNG images (one per slide).
   5. Encode a slideshow video in **one ffmpeg pass**: the concat-demuxer feeds
      slide images with explicit per-image durations while the master audio is
      muxed in — no per-clip intermediates.
 
 Public API
 ----------
-``compose_narrated_video(pptx_path, json_data, output_path, voice, pause_seconds)``
+``compose_narrated_video(pdf_path, json_data, output_path, voice, pause_seconds)``
     Generator that yields ``(status_message: str, result_path: str | None)``.
     The final successful yield has ``result_path`` set to the output MP4.
 """
@@ -90,7 +90,7 @@ def _concat_audio(paths: list[str], output_path: str) -> None:
 # ── Public composer ──────────────────────────────────────────────────────────
 
 def compose_narrated_video(
-    pptx_path: str | Path,
+    pdf_path: str | Path,
     json_data: dict | list,
     output_path: str | Path,
     voice: str = "af_heart",
@@ -109,7 +109,7 @@ def compose_narrated_video(
         :class:`ValueError`   — when sync validation fails.
         :class:`RuntimeError` — when an ffmpeg step fails.
     """
-    pptx_path = Path(pptx_path)
+    pdf_path = Path(pdf_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -120,10 +120,10 @@ def compose_narrated_video(
     try:
         # ── Step 1: Validate sync ────────────────────────────────────────────
         yield "Validating sync…", None
-        result = validate_sync(pptx_path, json_data)
+        result = validate_sync(pdf_path, json_data)
         if not result.ok:
             raise ValueError("Validation failed:\n" + "\n".join(result.errors))
-        yield f"Validation passed — {result.slide_count} slides ✓", None
+        yield f"Validation passed — {result.slide_count} pages ✓", None
 
         # ── Step 2: TTS — generate narration audio for every slide ───────────
         yield "Loading TTS engine…", None
@@ -198,7 +198,7 @@ def compose_narrated_video(
         # ── Step 4: Render slides → PNG ──────────────────────────────────────
         yield "Rendering slides…", None
         slides_dir = work_dir / "slides"
-        slide_images = render_slides(pptx_path, slides_dir)
+        slide_images = render_slides(pdf_path, slides_dir)
         if len(slide_images) != result.slide_count:
             raise RuntimeError(
                 f"Slide render produced {len(slide_images)} images "

@@ -10,18 +10,30 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 from PIL import Image
-from pptx import Presentation
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
-def _make_pptx(path: Path, slide_count: int) -> None:
-    prs = Presentation()
-    layout = prs.slide_layouts[6]
-    for _ in range(slide_count):
-        prs.slides.add_slide(layout)
-    prs.save(str(path))
+def _make_pdf(path: Path, page_count: int) -> None:
+    import fitz
+
+    doc = fitz.open()
+    for idx in range(page_count):
+        page = doc.new_page(width=1280, height=720)
+        page.draw_rect(
+            fitz.Rect(0, 0, 1280, 720),
+            color=(0.15 + idx * 0.05, 0.35, 0.75 - idx * 0.08),
+            fill=(0.15 + idx * 0.05, 0.35, 0.75 - idx * 0.08),
+        )
+        page.insert_textbox(
+            fitz.Rect(80, 80, 1200, 240),
+            f"Test Page {idx + 1}",
+            fontsize=42,
+            color=(1, 1, 1),
+        )
+    doc.save(path)
+    doc.close()
 
 
 def _write_silence(path: Path, seconds: float, sample_rate: int = 16000) -> None:
@@ -44,15 +56,15 @@ def _probe_duration(path: Path) -> float:
 def test_validate_sync_accepts_flexible_json_schema(tmp_path):
     from avatarpipeline.narration.validator import validate_sync
 
-    pptx_path = tmp_path / "deck.pptx"
-    _make_pptx(pptx_path, 2)
+    pdf_path = tmp_path / "deck.pdf"
+    _make_pdf(pdf_path, 2)
 
     json_data = [
         {"text": "Intro narration", "duration": 4},
         {"script": "Second narration", "pause": 0.5},
     ]
 
-    result = validate_sync(pptx_path, json_data)
+    result = validate_sync(pdf_path, json_data)
 
     assert result.ok
     assert result.slide_count == 2
@@ -66,8 +78,8 @@ def test_validate_sync_accepts_flexible_json_schema(tmp_path):
 def test_validate_sync_accepts_slide_number_keyed_dict(tmp_path):
     from avatarpipeline.narration.validator import validate_sync
 
-    pptx_path = tmp_path / "deck.pptx"
-    _make_pptx(pptx_path, 2)
+    pdf_path = tmp_path / "deck.pdf"
+    _make_pdf(pdf_path, 2)
 
     json_data = {
         "slides": {
@@ -76,7 +88,7 @@ def test_validate_sync_accepts_slide_number_keyed_dict(tmp_path):
         }
     }
 
-    result = validate_sync(pptx_path, json_data)
+    result = validate_sync(pdf_path, json_data)
 
     assert result.ok
     assert [entry["slide_number"] for entry in result.json_data["slides"]] == [1, 2]
@@ -87,8 +99,8 @@ def test_compose_narrated_video_generates_audio_before_render_and_uses_slide_tim
     import avatarpipeline.narration.composer as composer
     import avatarpipeline.voice.kokoro as kokoro_mod
 
-    pptx_path = tmp_path / "deck.pptx"
-    _make_pptx(pptx_path, 2)
+    pdf_path = tmp_path / "deck.pdf"
+    _make_pdf(pdf_path, 2)
 
     slide_images = []
     for idx, color in enumerate(((30, 64, 175), (15, 118, 110)), start=1):
@@ -96,7 +108,7 @@ def test_compose_narrated_video_generates_audio_before_render_and_uses_slide_tim
         Image.new("RGB", (1920, 1080), color).save(img_path)
         slide_images.append(img_path)
 
-    def fake_render_slides(_pptx_path, _output_dir):
+    def fake_render_slides(_pdf_path, _output_dir):
         return slide_images
 
     class FakeVoiceGenerator:
@@ -118,7 +130,7 @@ def test_compose_narrated_video_generates_audio_before_render_and_uses_slide_tim
 
     events = list(
         composer.compose_narrated_video(
-            pptx_path=pptx_path,
+            pdf_path=pdf_path,
             json_data=json_data,
             output_path=tmp_path / "narrated.mp4",
             voice="af_heart",

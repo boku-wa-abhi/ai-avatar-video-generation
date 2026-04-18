@@ -1,10 +1,10 @@
 """
-avatarpipeline.narration.validator — Sync-validation for PPTX + JSON narration files.
+avatarpipeline.narration.validator — Sync-validation for PDF + JSON narration files.
 
 Three checks are run:
-  1. PPT slide count must equal JSON entry count.
+  1. PDF page count must equal JSON entry count.
   2. JSON slide_number values must form a gapless, duplicate-free sequence 1…N.
-  3. Every JSON slide_number must reference a page that exists in the PPT.
+  3. Every JSON slide_number must reference a page that exists in the PDF.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
+from .slide_renderer import count_pages
 
 _SLIDES_KEYS = ("slides", "scenes", "entries", "items")
 _SLIDE_NUMBER_KEYS = (
@@ -190,11 +191,11 @@ def normalize_narration_json(json_data: dict | list) -> dict:
     return normalized_json
 
 
-def validate_sync(pptx_path: str | Path, json_data: dict | list) -> ValidationResult:
+def validate_sync(pdf_path: str | Path, json_data: dict | list) -> ValidationResult:
     """Run all three sync-validation checks and return a :class:`ValidationResult`.
 
     Args:
-        pptx_path:  Absolute path to the ``.pptx`` file.
+        pdf_path:   Absolute path to the input ``.pdf`` file.
         json_data:  Already-parsed narration JSON object or array.
 
     Returns:
@@ -202,18 +203,15 @@ def validate_sync(pptx_path: str | Path, json_data: dict | list) -> ValidationRe
         checks pass.  ``errors`` lists blocking failures; ``warnings`` lists
         non-blocking notices (e.g. slides with empty narration).
     """
-    from pptx import Presentation
-
-    pptx_path = Path(pptx_path)
+    pdf_path = Path(pdf_path)
     errors: list[str] = []
     warnings: list[str] = []
 
-    # ── Open the PPTX ───────────────────────────────────────────────────────
+    # ── Open the PDF ────────────────────────────────────────────────────────
     try:
-        prs = Presentation(str(pptx_path))
-        slide_count = len(prs.slides)
+        slide_count = count_pages(pdf_path)
     except Exception as exc:
-        return ValidationResult(ok=False, errors=[f"Cannot open PPTX file: {exc}"])
+        return ValidationResult(ok=False, errors=[f"Cannot open PDF file: {exc}"])
 
     # ── Parse JSON entries ───────────────────────────────────────────────────
     try:
@@ -231,7 +229,7 @@ def validate_sync(pptx_path: str | Path, json_data: dict | list) -> ValidationRe
     # Check 1 — Count match ──────────────────────────────────────────────────
     if slide_count != json_count:
         errors.append(
-            f"Mismatch: PPT has {slide_count} slides but JSON has {json_count} entries."
+            f"Mismatch: PDF has {slide_count} pages but JSON has {json_count} entries."
         )
 
     # Check 2 — Slide number sequence ────────────────────────────────────────
@@ -264,12 +262,12 @@ def validate_sync(pptx_path: str | Path, json_data: dict | list) -> ValidationRe
             f"Duplicates: {duplicates}."
         )
 
-    # Check 3 — Every JSON slide_number maps to a real PPT page ─────────────
+    # Check 3 — Every JSON slide_number maps to a real PDF page ─────────────
     for entry in slides_json:
         n = int(entry.get("slide_number", 0))
         if n < 1 or n > slide_count:
             errors.append(
-                f"JSON references slide number {n}, but PPT only has {slide_count} slides."
+                f"JSON references slide number {n}, but PDF only has {slide_count} pages."
             )
 
     # Warnings — empty narration text ────────────────────────────────────────
@@ -279,7 +277,7 @@ def validate_sync(pptx_path: str | Path, json_data: dict | list) -> ValidationRe
             warnings.append(f"Slide {entry.get('slide_number')} has no narration entry.")
 
     logger.debug(
-        f"Validation: pptx={pptx_path.name}, slides={slide_count}, "
+        f"Validation: pdf={pdf_path.name}, pages={slide_count}, "
         f"json_entries={json_count}, errors={len(errors)}, warnings={len(warnings)}"
     )
     return ValidationResult(
