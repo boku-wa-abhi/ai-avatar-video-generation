@@ -3,11 +3,11 @@ avatarpipeline.narration.composer — Compose a narrated video from PPTX + JSON.
 
 Pipeline (in order):
   1. Validate sync (PPTX slide count vs JSON, sequence, range checks).
-  2. Render PPTX slides → PNG images (one per slide).
-  3. Generate TTS narration audio for every slide.
-  4. Build a master audio track: each narration followed by a silence pad,
+  2. Generate TTS narration audio for every slide.
+  3. Build a master audio track: each narration followed by a silence pad,
      all concatenated into a single WAV file.  Also compute per-slide display
-     durations (audio_duration + pause_seconds).
+     durations from the generated audio plus any JSON timing overrides.
+  4. Render PPTX slides → PNG images (one per slide).
   5. Encode a slideshow video in **one ffmpeg pass**: the concat-demuxer feeds
      slide images with explicit per-image durations while the master audio is
      muxed in — no per-clip intermediates.
@@ -57,6 +57,7 @@ def _audio_duration(path: str | Path) -> float:
 
 def _gen_silence(duration: float, output_path: str) -> None:
     """Write a silent 16 kHz mono WAV of the requested length."""
+    duration = max(0.05, float(duration))
     cmd = [
         "ffmpeg", "-y",
         "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
@@ -90,7 +91,7 @@ def _concat_audio(paths: list[str], output_path: str) -> None:
 
 def compose_narrated_video(
     pptx_path: str | Path,
-    json_data: dict,
+    json_data: dict | list,
     output_path: str | Path,
     voice: str = "af_heart",
     pause_seconds: float = DEFAULT_PAUSE,
@@ -124,7 +125,77 @@ def compose_narrated_video(
             raise ValueError("Validation failed:\n" + "\n".join(result.errors))
         yield f"Validation passed — {result.slide_count} slides ✓", None
 
-        # ── Step 2: Render slides → PNG ──────────────────────────────────────
+        # ── Step 2: TTS — generate narration audio for every slide ───────────
+        yield "Loading TTS engine…", None
+        from avatarpipeline.voice.kokoro import VoiceGenerator
+        vg = VoiceGenerator()
+
+        normalized_json = result.json_data
+        default_pause = float(normalized_json.get("default_pause_seconds", pause_seconds))
+        default_display = float(normalized_json.get("default_display_seconds", 0.0) or 0.0)
+        entries = sorted(normalized_json["slides"], key=lambda e: int(e["slide_number"]))
+        audio_dir = work_dir / "audio"
+        audio_dir.mkdir(exist_ok=True)
+
+        narr_paths: list[str] = []
+        narr_audio_durations: list[float] = []
+        n = len(entries)
+        for idx, entry in enumerate(entries):
+            slide_num = int(entry["slide_number"])
+            narration = (entry.get("narration") or "").strip()
+            out_wav = str(audio_dir / f"narr_{slide_num:03d}.wav")
+            if narration:
+                vg.generate(narration, voice=voice, out_path=out_wav)
+            else:
+                _gen_silence(0.1, out_wav)
+            narr_paths.append(out_wav)
+            narr_audio_durations.append(max(0.1, _audio_duration(out_wav)))
+            yield f"TTS {idx + 1}/{n}: slide {slide_num}", None
+
+        # ── Step 3: Build master audio track ─────────────────────────────────
+        # Each narration is extended to at least the requested slide display
+        # duration, then an optional post-slide pause is appended.  The image
+        # durations mirror the final audio segment durations.
+        yield "Building master audio…", None
+
+        padded_dir = work_dir / "padded"
+        padded_dir.mkdir(exist_ok=True)
+        padded_paths: list[str] = []
+        slide_durations: list[float] = []
+
+        for entry, narr_wav, audio_dur in zip(entries, narr_paths, narr_audio_durations):
+            slide_num = int(entry["slide_number"])
+            min_display = float(entry.get("display_seconds", default_display) or 0.0)
+            slide_pause = float(entry.get("pause_seconds", default_pause) or 0.0)
+            display_dur = max(audio_dur, min_display)
+            hold_dur = max(0.0, display_dur - audio_dur)
+            total_dur = display_dur + slide_pause
+            slide_durations.append(total_dur)
+
+            segment_inputs = [narr_wav]
+            hold_wav = str(padded_dir / f"hold_{slide_num:03d}.wav")
+            pause_wav = str(padded_dir / f"pause_{slide_num:03d}.wav")
+            padded_wav = str(padded_dir / f"padded_{slide_num:03d}.wav")
+            if hold_dur > 0:
+                _gen_silence(hold_dur, hold_wav)
+                segment_inputs.append(hold_wav)
+            if slide_pause > 0:
+                _gen_silence(slide_pause, pause_wav)
+                segment_inputs.append(pause_wav)
+            if len(segment_inputs) == 1:
+                shutil.copy2(narr_wav, padded_wav)
+            else:
+                _concat_audio(segment_inputs, padded_wav)
+            padded_paths.append(padded_wav)
+
+        master_audio = str(work_dir / "master.wav")
+        _concat_audio(padded_paths, master_audio)
+        logger.debug(
+            f"Master audio built: {sum(slide_durations):.1f}s total, "
+            f"{len(slide_durations)} slides"
+        )
+
+        # ── Step 4: Render slides → PNG ──────────────────────────────────────
         yield "Rendering slides…", None
         slides_dir = work_dir / "slides"
         slide_images = render_slides(pptx_path, slides_dir)
@@ -134,59 +205,6 @@ def compose_narrated_video(
                 f"but expected {result.slide_count}."
             )
         yield f"Slides rendered ({len(slide_images)} images)", None
-
-        # ── Step 3: TTS — generate narration audio for every slide ───────────
-        yield "Loading TTS engine…", None
-        from avatarpipeline.voice.kokoro import VoiceGenerator
-        vg = VoiceGenerator()
-
-        entries = sorted(json_data["slides"], key=lambda e: int(e["slide_number"]))
-        audio_dir = work_dir / "audio"
-        audio_dir.mkdir(exist_ok=True)
-
-        narr_paths: list[str] = []
-        n = len(entries)
-        for idx, entry in enumerate(entries):
-            slide_num = int(entry["slide_number"])
-            narration = (entry.get("narration") or "").strip()
-            out_wav = str(audio_dir / f"narr_{slide_num:03d}.wav")
-            if narration:
-                vg.generate(narration, voice=voice, out_path=out_wav)
-            else:
-                _gen_silence(0.5, out_wav)
-            narr_paths.append(out_wav)
-            yield f"TTS {idx + 1}/{n}: slide {slide_num}", None
-
-        # ── Step 4: Build master audio track ─────────────────────────────────
-        # Each narration is padded with a silence tail (= pause_seconds),
-        # then all padded segments are concatenated into one master WAV.
-        # We also record the total display duration per slide for the image
-        # concat demuxer in step 5.
-        yield "Building master audio…", None
-
-        padded_dir = work_dir / "padded"
-        padded_dir.mkdir(exist_ok=True)
-        padded_paths: list[str] = []
-        slide_durations: list[float] = []
-
-        for idx, narr_wav in enumerate(narr_paths):
-            slide_num = idx + 1
-            audio_dur = _audio_duration(narr_wav)
-            total_dur = audio_dur + pause_seconds
-            slide_durations.append(total_dur)
-
-            pad_wav = str(padded_dir / f"pad_{slide_num:03d}.wav")
-            padded_wav = str(padded_dir / f"padded_{slide_num:03d}.wav")
-            _gen_silence(pause_seconds, pad_wav)
-            _concat_audio([narr_wav, pad_wav], padded_wav)
-            padded_paths.append(padded_wav)
-
-        master_audio = str(work_dir / "master.wav")
-        _concat_audio(padded_paths, master_audio)
-        logger.debug(
-            f"Master audio built: {sum(slide_durations):.1f}s total, "
-            f"{len(slide_durations)} slides"
-        )
 
         # ── Step 5: Encode slideshow video — one ffmpeg pass ─────────────────
         # ffmpeg concat demuxer: each slide PNG shown for its computed duration,

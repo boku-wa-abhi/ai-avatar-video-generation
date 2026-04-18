@@ -747,9 +747,9 @@ PODCAST_STEP_NAMES = [
 
 NARRATION_STEP_NAMES = [
     "Validate Sync",
-    "Render Slides",
     "Generate Narration Audio",
     "Build Master Audio",
+    "Render Slides",
     "Encode Slideshow Video",
 ]
 
@@ -766,7 +766,7 @@ def _build_narration_progress_html(
     rows = []
     for i, (name, state, t) in enumerate(zip(NARRATION_STEP_NAMES, step_states, step_times)):
         icon_name, css_cls = _STEP_ICONS[state]
-        label = f"{name}: {detail}" if i == 2 and detail else name
+        label = f"{name}: {detail}" if i == 1 and detail else name
         rows.append(
             f'<div class="step-row {css_cls}">'
             f'<span class="material-symbols-outlined step-icon-m">{icon_name}</span>'
@@ -810,15 +810,18 @@ def _narration_validation_html(
         header_text = f"All checks passed — {slide_count} slides ready"
 
     rows: list[str] = []
+    count_error = any("ppt has" in e.lower() and "json has" in e.lower() for e in errors)
+    sequence_error = any("not sequential" in e.lower() or "slide_number" in e.lower() for e in errors)
+    range_error = any("only has" in e.lower() for e in errors)
 
     check_labels = [
-        ("Slide count match", slide_count == json_count or not ok,
+        ("Slide count match", not count_error,
          f"PPT has {slide_count} slides, JSON has {json_count} entries"),
-        ("Slide number sequence", True, "Checked"),
-        ("Slide numbers in range", True, "Checked"),
+        ("Slide number sequence", not sequence_error, "Checked"),
+        ("Slide numbers in range", not range_error, "Checked"),
     ]
     for label, _pass, detail in check_labels:
-        icon = "check_circle" if _pass and not any(label.lower() in e.lower() for e in errors) else "cancel"
+        icon = "check_circle" if _pass else "cancel"
         color = "color:var(--g-green)" if icon == "check_circle" else "color:var(--g-red)"
         rows.append(
             f'<div class="narr-check-row">'
@@ -935,7 +938,7 @@ def generate_narration_video(
         f"PPT: {Path(pptx_file).name}",
         f"JSON: {Path(json_file).name}",
         f"Voice: {voice_choice}",
-        f"Pause between slides: {pause_secs}s",
+        f"Default pause between slides: {pause_secs}s",
     ]
 
     try:
@@ -968,36 +971,36 @@ def generate_narration_video(
                 states[1] = "active"
                 step_starts[1] = time.time()
 
-            elif msg.startswith("Rendering"):
+            elif msg.startswith("Loading TTS"):
                 states[1] = "active"
                 if 1 not in step_starts:
                     step_starts[1] = time.time()
 
-            elif msg.startswith("Slides rendered"):
-                states[1] = "done"
-                times[1] = step_time(step_starts.get(1, time.time()))
-                states[2] = "active"
-                step_starts[2] = time.time()
-
-            elif msg.startswith("Loading TTS"):
-                states[2] = "active"
-                if 2 not in step_starts:
-                    step_starts[2] = time.time()
-
             elif msg.startswith("TTS"):
-                states[2] = "active"
+                states[1] = "active"
                 detail = msg
 
             elif msg.startswith("Building master"):
+                states[1] = "done"
+                times[1] = step_time(step_starts.get(1, time.time()))
+                states[2] = "active"
+                if 2 not in step_starts:
+                    step_starts[2] = time.time()
+                detail = ""
+
+            elif msg.startswith("Rendering"):
                 states[2] = "done"
                 times[2] = step_time(step_starts.get(2, time.time()))
                 states[3] = "active"
                 step_starts[3] = time.time()
                 detail = ""
 
-            elif msg.startswith("Encoding slideshow"):
+            elif msg.startswith("Slides rendered"):
                 states[3] = "done"
                 times[3] = step_time(step_starts.get(3, time.time()))
+                detail = ""
+
+            elif msg.startswith("Encoding slideshow"):
                 states[4] = "active"
                 step_starts[4] = time.time()
                 detail = ""
@@ -2413,9 +2416,9 @@ with gr.Blocks(title="Avatar Studio") as demo:
             )
             gr.Markdown(
                 "Upload a **PowerPoint** file and a **JSON narration** file. "
-                "The tool validates that they are in sync, then generates a narrated "
-                "video where each slide is shown while its TTS audio plays, followed "
-                "by a configurable pause before the next slide."
+                "The tool validates that they are in sync, generates the narration audio first, "
+                "then renders a narrated video where each slide stays on screen for the generated "
+                "audio length or any longer timing you specify in JSON, followed by an optional pause."
             )
 
             # ── Inputs ──────────────────────────────────────────────────────
@@ -2436,7 +2439,11 @@ with gr.Blocks(title="Avatar Studio") as demo:
 
             gr.HTML(
                 "<div style='font-size:0.8rem;color:var(--g-on-surface-variant);margin:-8px 0 12px'>"
-                "JSON format: <code>{\"presentation_title\": \"…\", \"slides\": [{\"slide_number\": 1, \"narration\": \"…\"}, …]}</code>"
+                "JSON format: <code>{\"presentation_title\": \"…\", \"default_pause_seconds\": 1.0, "
+                "\"slides\": [{\"slide_number\": 1, \"narration\": \"…\", \"duration_seconds\": 6, "
+                "\"pause_seconds\": 0.5}, …]}</code><br>"
+                "Also accepted: plain slide arrays, <code>text</code>/<code>script</code> instead of "
+                "<code>narration</code>, and omitted <code>slide_number</code> fields when the JSON order matches the deck."
                 "</div>"
             )
 
