@@ -13,6 +13,7 @@ Opens automatically at http://localhost:7860
 import base64
 import gc
 import glob
+import json as _json
 import os
 import shutil
 import subprocess
@@ -51,6 +52,8 @@ from avatarpipeline.podcast.composer import (
     parse_podcast_script,
     resample_16k,
 )
+from avatarpipeline.narration.validator import validate_sync as _narration_validate
+from avatarpipeline.narration.composer import compose_narrated_video, DEFAULT_PAUSE as NARRATION_DEFAULT_PAUSE
 
 CONFIG_PATH = ROOT / "configs" / "settings.yaml"
 ENV_PATH    = ROOT / ".env"
@@ -736,6 +739,305 @@ PODCAST_STEP_NAMES = [
     "Compose Podcast Video",
     "Finalize",
 ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Slide Narrator helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+NARRATION_STEP_NAMES = [
+    "Validate Sync",
+    "Render Slides",
+    "Generate Narration Audio",
+    "Build Slide Clips",
+    "Concatenate & Finalize",
+]
+
+
+def _build_narration_progress_html(
+    step_states: list[str],
+    step_times: list[str],
+    pct: float,
+    elapsed: str,
+    detail: str = "",
+    message: str = "",
+) -> str:
+    """Build progress-panel HTML for the Slide Narrator pipeline."""
+    rows = []
+    for i, (name, state, t) in enumerate(zip(NARRATION_STEP_NAMES, step_states, step_times)):
+        icon_name, css_cls = _STEP_ICONS[state]
+        label = f"{name}: {detail}" if i == 2 and detail else name
+        rows.append(
+            f'<div class="step-row {css_cls}">'
+            f'<span class="material-symbols-outlined step-icon-m">{icon_name}</span>'
+            f'<span class="step-name">{label}</span>'
+            f'<span class="step-time-val">{t}</span>'
+            f'</div>'
+        )
+    bar_pct = max(0, min(100, int(pct * 100)))
+    footer = f'<div class="progress-message">{message}</div>' if message else ""
+    return (
+        f'<div class="progress-panel">'
+        f'<div class="progress-header">'
+        f'<span class="material-symbols-outlined">slideshow</span> Narration Pipeline</div>'
+        f'{"".join(rows)}'
+        f'<div class="progress-track"><div class="progress-fill" style="width:{bar_pct}%"></div></div>'
+        f'<div class="progress-elapsed">{elapsed}</div>'
+        f'{footer}'
+        f'</div>'
+    )
+
+
+def _narration_validation_html(
+    ok: bool,
+    errors: list[str],
+    warnings: list[str],
+    slide_count: int = 0,
+    json_count: int = 0,
+) -> str:
+    """Return styled HTML for a validation result box."""
+    if not ok:
+        css_cls = "narr-validation-fail"
+        header_icon = "cancel"
+        header_text = "Validation Failed — fix errors before generating"
+    elif warnings:
+        css_cls = "narr-validation-warn"
+        header_icon = "warning"
+        header_text = f"Validation Passed with warnings — {slide_count} slides"
+    else:
+        css_cls = "narr-validation-pass"
+        header_icon = "check_circle"
+        header_text = f"All checks passed — {slide_count} slides ready"
+
+    rows: list[str] = []
+
+    check_labels = [
+        ("Slide count match", slide_count == json_count or not ok,
+         f"PPT has {slide_count} slides, JSON has {json_count} entries"),
+        ("Slide number sequence", True, "Checked"),
+        ("Slide numbers in range", True, "Checked"),
+    ]
+    for label, _pass, detail in check_labels:
+        icon = "check_circle" if _pass and not any(label.lower() in e.lower() for e in errors) else "cancel"
+        color = "color:var(--g-green)" if icon == "check_circle" else "color:var(--g-red)"
+        rows.append(
+            f'<div class="narr-check-row">'
+            f'<span class="material-symbols-outlined narr-check-icon" style="{color}">{icon}</span>'
+            f'<span>{label}</span>'
+            f'</div>'
+        )
+
+    error_html = ""
+    if errors:
+        items = "".join(f"<li>{e}</li>" for e in errors)
+        error_html = f"<br><b>Errors:</b><ul style='margin:4px 0 0 18px;padding:0'>{items}</ul>"
+
+    warn_html = ""
+    if warnings:
+        items = "".join(f"<li>{w}</li>" for w in warnings)
+        warn_html = f"<br><b>Warnings:</b><ul style='margin:4px 0 0 18px;padding:0'>{items}</ul>"
+
+    return (
+        f'<div class="{css_cls}">'
+        f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:600">'
+        f'<span class="material-symbols-outlined" style="font-size:20px">{header_icon}</span>'
+        f'{header_text}</div>'
+        f'{"".join(rows)}'
+        f'{error_html}'
+        f'{warn_html}'
+        f'</div>'
+    )
+
+
+def validate_narration_files(pptx_file: str | None, json_file: str | None) -> str:
+    """Run sync validation and return a styled HTML report."""
+    if not pptx_file:
+        return _narration_validation_html(False, ["No PPTX file uploaded."], [])
+    if not json_file:
+        return _narration_validation_html(False, ["No JSON narration file uploaded."], [])
+    try:
+        with open(json_file) as f:
+            json_data = _json.load(f)
+    except Exception as exc:
+        return _narration_validation_html(False, [f"Cannot parse JSON file: {exc}"], [])
+
+    try:
+        result = _narration_validate(pptx_file, json_data)
+    except Exception as exc:
+        return _narration_validation_html(False, [f"Validation error: {exc}"], [])
+
+    return _narration_validation_html(
+        result.ok,
+        result.errors,
+        result.warnings,
+        result.slide_count,
+        result.json_count,
+    )
+
+
+def generate_narration_video(
+    pptx_file: str | None,
+    json_file: str | None,
+    voice_choice: str,
+    pause_secs: float,
+    progress=gr.Progress(track_tqdm=False),
+):
+    """Generator: build a narrated presentation video.
+
+    Yields ``(video_path_or_None, progress_html, report_text)`` tuples.
+    """
+    _cancel_event.clear()
+    wall_start = time.time()
+    TOTAL = 5
+    states = ["waiting"] * TOTAL
+    times = [""] * TOTAL
+    detail = ""
+
+    def elapsed_str() -> str:
+        s = int(time.time() - wall_start)
+        return f"{s // 60}m {s % 60:02d}s"
+
+    def step_time(t0: float) -> str:
+        d = time.time() - t0
+        return f"{d:.1f}s" if d < 60 else f"{int(d) // 60}m {int(d) % 60}s"
+
+    def render(pct: float, msg: str = "") -> str:
+        return _build_narration_progress_html(states, times, pct, elapsed_str(), detail, msg)
+
+    # ── Input validation ─────────────────────────────────────────────────────
+    if not pptx_file:
+        states[0] = "error"
+        yield None, render(0, "Upload a PPTX file."), ""
+        return
+    if not json_file:
+        states[0] = "error"
+        yield None, render(0, "Upload a JSON narration file."), ""
+        return
+
+    try:
+        with open(json_file) as f:
+            json_data = _json.load(f)
+    except Exception as exc:
+        states[0] = "error"
+        yield None, render(0, f"Cannot parse JSON: {exc}"), ""
+        return
+
+    voice_id = VOICE_CHOICES.get(voice_choice, "af_heart")
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = str(OUTPUT_DIR / f"narration_{run_id}.mp4")
+
+    n_slides = 0
+    step_starts: dict[int, float] = {}
+    clip_step_started = False
+    result_path: str | None = None
+    report_lines = [
+        f"Narrated Presentation Report",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"PPT: {Path(pptx_file).name}",
+        f"JSON: {Path(json_file).name}",
+        f"Voice: {voice_choice}",
+        f"Pause between slides: {pause_secs}s",
+    ]
+
+    try:
+        gen = compose_narrated_video(
+            pptx_path=pptx_file,
+            json_data=json_data,
+            output_path=output_path,
+            voice=voice_id,
+            pause_seconds=float(pause_secs),
+        )
+
+        for msg, result in gen:
+            if _cancel_event.is_set():
+                yield None, render(0, "Cancelled."), "\n".join(report_lines)
+                return
+
+            # ── State machine ────────────────────────────────────────────────
+            if msg.startswith("Validating"):
+                states[0] = "active"
+                step_starts[0] = time.time()
+
+            elif msg.startswith("Validation passed"):
+                states[0] = "done"
+                times[0] = step_time(step_starts.get(0, time.time()))
+                try:
+                    n_slides = int([t for t in msg.split() if t.isdigit()][0])
+                except (IndexError, ValueError):
+                    n_slides = 0
+                report_lines.append(f"Slides: {n_slides}")
+                states[1] = "active"
+                step_starts[1] = time.time()
+
+            elif msg.startswith("Rendering"):
+                states[1] = "active"
+                if 1 not in step_starts:
+                    step_starts[1] = time.time()
+
+            elif msg.startswith("Slides rendered"):
+                states[1] = "done"
+                times[1] = step_time(step_starts.get(1, time.time()))
+                states[2] = "active"
+                step_starts[2] = time.time()
+
+            elif msg.startswith("Loading TTS"):
+                states[2] = "active"
+                if 2 not in step_starts:
+                    step_starts[2] = time.time()
+
+            elif msg.startswith("TTS"):
+                states[2] = "active"
+                detail = msg
+
+            elif msg.startswith("Clip"):
+                if not clip_step_started:
+                    clip_step_started = True
+                    states[2] = "done"
+                    times[2] = step_time(step_starts.get(2, time.time()))
+                    states[3] = "active"
+                    step_starts[3] = time.time()
+                detail = msg
+
+            elif msg.startswith("Concatenating"):
+                states[3] = "done"
+                times[3] = step_time(step_starts.get(3, time.time()))
+                states[4] = "active"
+                step_starts[4] = time.time()
+                detail = ""
+
+            elif msg == "Done!" and result:
+                states[4] = "done"
+                times[4] = step_time(step_starts.get(4, time.time()))
+                result_path = result
+
+            # ── Compute progress ─────────────────────────────────────────────
+            done_count = states.count("done")
+            pct = min(0.97, done_count / TOTAL + 0.02)
+            progress(pct, desc=msg)
+            yield None, render(pct, msg), "\n".join(report_lines)
+
+        if result_path:
+            report_lines.append(f"Output: {Path(result_path).name}")
+            report_text = "\n".join(report_lines)
+            yield result_path, render(1.0, "Complete!"), report_text
+        else:
+            yield None, render(0, "No output was produced."), "\n".join(report_lines)
+
+    except ValueError as exc:
+        # Validation failure
+        states[0] = "error"
+        err_msg = str(exc)
+        report_lines.append(f"FAILED: {err_msg}")
+        yield None, render(0, err_msg[:240]), "\n".join(report_lines)
+
+    except Exception as exc:
+        logger.error(f"Narration generation failed: {exc}")
+        for i, s in enumerate(states):
+            if s == "active":
+                states[i] = "error"
+        err_msg = str(exc)
+        report_lines.append(f"FAILED: {err_msg}")
+        yield None, render(0, f"Error: {err_msg[:200]}"), "\n".join(report_lines)
 
 
 def save_podcast_avatar(file_path: str | None, speaker_id: str) -> str:
@@ -1464,6 +1766,43 @@ footer { display: none !important; }
     color: var(--g-green);
     border-left: 3px solid var(--g-green);
 }
+
+/* ── Slide Narrator tab ──────────────────────────────────────────────────── */
+.narr-validation-pass {
+    background: var(--g-green-light);
+    color: #0a7a55;
+    border: 1px solid var(--g-green);
+    border-radius: var(--g-radius);
+    padding: 16px 20px;
+    font-family: 'Google Sans Text', sans-serif;
+    font-size: 0.88rem;
+    line-height: 1.6;
+}
+.narr-validation-fail {
+    background: var(--g-red-light);
+    color: #b91c1c;
+    border: 1px solid var(--g-red);
+    border-radius: var(--g-radius);
+    padding: 16px 20px;
+    font-family: 'Google Sans Text', sans-serif;
+    font-size: 0.88rem;
+    line-height: 1.6;
+}
+.narr-validation-warn {
+    background: #fffbeb;
+    color: #92400e;
+    border: 1px solid #f59e0b;
+    border-radius: var(--g-radius);
+    padding: 16px 20px;
+    font-family: 'Google Sans Text', sans-serif;
+    font-size: 0.88rem;
+    line-height: 1.6;
+}
+.narr-check-row {
+    display: flex; align-items: flex-start; gap: 8px;
+    margin-bottom: 6px;
+}
+.narr-check-icon { font-size: 17px; flex-shrink: 0; margin-top: 1px; }
 """
 
 
@@ -2065,6 +2404,133 @@ with gr.Blocks(title="Avatar Studio") as demo:
             )
             pod_cancel_btn.click(fn=cancel_generation, outputs=[pod_log])
             pod_open_folder.click(fn=open_output_folder, outputs=[pod_folder_status])
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Tab 6 — Slide Narrator
+        # ══════════════════════════════════════════════════════════════════════
+        with gr.TabItem("Slide Narrator", id="tab-narration"):
+            gr.HTML(
+                "<div class='section-title'>"
+                "<span class='material-symbols-outlined'>slideshow</span>"
+                " PPT + JSON Narration Sync Tool</div>"
+            )
+            gr.Markdown(
+                "Upload a **PowerPoint** file and a **JSON narration** file. "
+                "The tool validates that they are in sync, then generates a narrated "
+                "video where each slide is shown while its TTS audio plays, followed "
+                "by a configurable pause before the next slide."
+            )
+
+            # ── Inputs ──────────────────────────────────────────────────────
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>upload_file</span> Inputs</div>")
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=1):
+                    narr_pptx = gr.File(
+                        label="PowerPoint File (.pptx)",
+                        file_types=[".pptx"],
+                        file_count="single",
+                    )
+                with gr.Column(scale=1):
+                    narr_json = gr.File(
+                        label="Narration JSON File",
+                        file_types=[".json"],
+                        file_count="single",
+                    )
+
+            gr.HTML(
+                "<div style='font-size:0.8rem;color:var(--g-on-surface-variant);margin:-8px 0 12px'>"
+                "JSON format: <code>{\"presentation_title\": \"…\", \"slides\": [{\"slide_number\": 1, \"narration\": \"…\"}, …]}</code>"
+                "</div>"
+            )
+
+            # ── Validate button + result ─────────────────────────────────────
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>rule</span> Validation</div>")
+            narr_validate_btn = gr.Button(
+                "▶  Validate Files",
+                size="sm",
+                variant="secondary",
+            )
+            narr_validation_result = gr.HTML(
+                value="<div style='color:var(--g-on-surface-variant);font-size:0.85rem;padding:10px 0'>"
+                      "Upload both files, then click Validate to run sync checks.</div>",
+                label="Validation Result",
+            )
+
+            gr.HTML('<div class="divider"></div>')
+
+            # ── Configuration ────────────────────────────────────────────────
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>tune</span> Voice & Timing</div>")
+            with gr.Row():
+                narr_voice = gr.Dropdown(
+                    label="Narration Voice (Kokoro TTS)",
+                    choices=list(VOICE_CHOICES.keys()),
+                    value="Heart \u2014 Warm Female (default)",
+                    scale=2,
+                )
+                narr_pause = gr.Slider(
+                    label="Pause between slides (seconds)",
+                    minimum=0.0,
+                    maximum=5.0,
+                    step=0.5,
+                    value=float(NARRATION_DEFAULT_PAUSE),
+                    scale=1,
+                )
+
+            gr.HTML('<div class="divider"></div>')
+
+            # ── Generate ─────────────────────────────────────────────────────
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>movie</span> Generate</div>")
+            with gr.Row():
+                narr_generate_btn = gr.Button(
+                    "Generate Narrated Video",
+                    variant="primary",
+                    elem_classes=["g-btn-primary"],
+                    scale=3,
+                )
+                narr_cancel_btn = gr.Button(
+                    "Cancel",
+                    variant="stop",
+                    elem_classes=["g-btn-danger"],
+                    scale=1,
+                )
+
+            narr_log = gr.HTML(label="Progress", value="")
+
+            with gr.Row():
+                narr_output = gr.Video(
+                    label="Narrated Video",
+                    height=440,
+                    scale=2,
+                )
+                with gr.Column(scale=1):
+                    narr_report = gr.Textbox(
+                        label="Report",
+                        lines=14,
+                        interactive=False,
+                        placeholder="Validation + generation report will appear here…",
+                    )
+                    narr_open_folder = gr.Button("Open Output Folder", size="sm", variant="secondary")
+                    narr_folder_status = gr.Textbox(
+                        label="",
+                        interactive=False,
+                        lines=1,
+                        show_label=False,
+                        visible=True,
+                    )
+
+            # ── Wiring ───────────────────────────────────────────────────────
+            narr_validate_btn.click(
+                fn=validate_narration_files,
+                inputs=[narr_pptx, narr_json],
+                outputs=[narr_validation_result],
+            )
+            narr_generate_btn.click(
+                fn=generate_narration_video,
+                inputs=[narr_pptx, narr_json, narr_voice, narr_pause],
+                outputs=[narr_output, narr_log, narr_report],
+            )
+            narr_cancel_btn.click(fn=cancel_generation, outputs=[narr_log])
+            narr_open_folder.click(fn=open_output_folder, outputs=[narr_folder_status])
 
     # ── Settings ─────────────────────────────────────────────────────────────
     with gr.Accordion("Settings", open=False):

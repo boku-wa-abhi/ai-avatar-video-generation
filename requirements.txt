@@ -21,3 +21,4 @@ diffusers>=0.25.0
 transformers>=4.36.0
 accelerate
 gradio>=4.0.0
+python-pptx>=1.0.0
