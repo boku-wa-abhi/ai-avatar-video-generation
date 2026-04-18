@@ -3,7 +3,10 @@
 from .composer import (
     LAYOUT_CHOICES,
     OVERLAY_CHOICES,
+    build_timeline_from_tracks,
+    compose_podcast_sequential,
     compose_podcast_video,
+    detect_speech_segments,
     generate_per_speaker_audio,
     get_unique_speakers,
     mix_audio_tracks,
@@ -14,7 +17,10 @@ from .composer import (
 __all__ = [
     "LAYOUT_CHOICES",
     "OVERLAY_CHOICES",
+    "build_timeline_from_tracks",
+    "compose_podcast_sequential",
     "compose_podcast_video",
+    "detect_speech_segments",
     "generate_per_speaker_audio",
     "get_unique_speakers",
     "mix_audio_tracks",

@@ -42,6 +42,8 @@ from avatarpipeline.voice.mlx_voice import MlxVoiceStudio
 from avatarpipeline.podcast.composer import (
     LAYOUT_CHOICES as PODCAST_LAYOUTS,
     OVERLAY_CHOICES as PODCAST_OVERLAYS,
+    build_timeline_from_tracks,
+    compose_podcast_sequential,
     compose_podcast_video,
     generate_per_speaker_audio,
     get_unique_speakers,
@@ -863,6 +865,10 @@ def generate_podcast(
         yield None, render(1 / TOTAL), ""
         t0 = time.time()
 
+        # These are populated in script mode and used in Step 4 for sequential cuts
+        _pod_timeline: list[dict] | None = None
+        _pod_speakers: list[str] | None = None
+
         if mode == "Script":
             if not script or not script.strip():
                 states[0] = "error"
@@ -886,6 +892,9 @@ def generate_podcast(
             )
             track_a = speaker_tracks[speakers[0]]
             track_b = speaker_tracks[speakers[1]]
+            # Store for sequential composition in Step 4
+            _pod_timeline = _timeline
+            _pod_speakers = speakers
         else:
             # Audio upload mode
             if not audio_a or not Path(audio_a).exists():
@@ -956,12 +965,32 @@ def generate_podcast(
             except Exception:
                 pass
 
-        compose_podcast_video(
-            lipsync_a, lipsync_b, master_audio, output_path,
-            layout=layout, overlay=overlay,
-            custom_overlay_path=overlay_file,
-            orientation=orient_code,
-        )
+        if layout == "Sequential (Active Speaker)":
+            # Build a normalised A/B timeline for sequential cuts
+            if _pod_timeline is not None and _pod_speakers and len(_pod_speakers) >= 2:
+                # Script mode: map speaker names → A / B
+                sp_key = {_pod_speakers[0]: "A", _pod_speakers[1]: "B"}
+                norm_timeline = [
+                    {"speaker": sp_key.get(e["speaker"], "A"),
+                     "start": e["start"], "end": e["end"]}
+                    for e in _pod_timeline
+                ]
+            else:
+                # Upload-audio mode: detect speech from each resampled track
+                norm_timeline = build_timeline_from_tracks(track_a, track_b)
+
+            compose_podcast_sequential(
+                lipsync_a, lipsync_b, master_audio, norm_timeline, output_path,
+                overlay=overlay, custom_overlay_path=overlay_file,
+                orientation=orient_code,
+            )
+        else:
+            compose_podcast_video(
+                lipsync_a, lipsync_b, master_audio, output_path,
+                layout=layout, overlay=overlay,
+                custom_overlay_path=overlay_file,
+                orientation=orient_code,
+            )
         states[3] = "done"; times[3] = step_time(t0)
         yield None, render(4 / TOTAL), ""
 
@@ -1913,7 +1942,7 @@ with gr.Blocks(title="Avatar Studio") as demo:
                 pod_layout = gr.Radio(
                     label="Frame Layout",
                     choices=PODCAST_LAYOUTS,
-                    value="Split Screen",
+                    value="Sequential (Active Speaker)",
                     scale=2,
                 )
                 pod_orientation = gr.Radio(

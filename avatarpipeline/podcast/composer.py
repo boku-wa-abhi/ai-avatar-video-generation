@@ -19,6 +19,7 @@ from loguru import logger
 # ── Layout & overlay presets ────────────────────────────────────────────────
 
 LAYOUT_CHOICES = [
+    "Sequential (Active Speaker)",
     "Split Screen",
     "Focus Speaker A",
     "Focus Speaker B",
@@ -265,6 +266,214 @@ def _build_speaker_track(
     finally:
         if os.path.exists(concat_path):
             os.unlink(concat_path)
+
+
+# ── Speech detection (for upload-audio mode) ────────────────────────────────
+
+def detect_speech_segments(
+    audio_path: str,
+    threshold: str = "-35dB",
+    min_silence: float = 0.3,
+) -> list[dict]:
+    """Return speech segments ``[{"start": float, "end": float}]`` by inverting
+    ffmpeg silencedetect output.  Works on any audio format ffmpeg can read."""
+    r = subprocess.run(
+        ["ffmpeg", "-i", audio_path,
+         "-af", f"silencedetect=n={threshold}:d={min_silence}",
+         "-f", "null", "-"],
+        capture_output=True, text=True, timeout=60,
+    )
+    total_dur = _get_audio_duration(audio_path)
+
+    # Parse silence intervals from ffmpeg stderr
+    silence_intervals: list[tuple[float, float]] = []
+    current_start: float | None = None
+    for line in r.stderr.split("\n"):
+        if "silence_start:" in line:
+            try:
+                current_start = float(line.split("silence_start:")[1].strip())
+            except (IndexError, ValueError):
+                pass
+        elif "silence_end:" in line and current_start is not None:
+            try:
+                end_val = float(line.split("silence_end:")[1].split("|")[0].strip())
+                silence_intervals.append((current_start, end_val))
+                current_start = None
+            except (IndexError, ValueError):
+                pass
+
+    # Audio that ends in silence
+    if current_start is not None:
+        silence_intervals.append((current_start, total_dur))
+
+    # Invert silence → speech
+    speech_segments: list[dict] = []
+    cursor = 0.0
+    for sil_start, sil_end in silence_intervals:
+        if sil_start - cursor > 0.1:
+            speech_segments.append({"start": cursor, "end": sil_start})
+        cursor = sil_end
+    if total_dur - cursor > 0.1:
+        speech_segments.append({"start": cursor, "end": total_dur})
+
+    return speech_segments
+
+
+def build_timeline_from_tracks(track_a: str, track_b: str) -> list[dict]:
+    """Build a ``{"speaker":"A"|"B", "start", "end"}`` timeline from two
+    audio files (each file has speech only during that speaker's turns)."""
+    segs_a = detect_speech_segments(track_a)
+    segs_b = detect_speech_segments(track_b)
+
+    timeline: list[dict] = []
+    for seg in segs_a:
+        timeline.append({"speaker": "A", "start": seg["start"], "end": seg["end"]})
+    for seg in segs_b:
+        timeline.append({"speaker": "B", "start": seg["start"], "end": seg["end"]})
+
+    timeline.sort(key=lambda x: x["start"])
+    return timeline
+
+
+# ── Sequential composition (active-speaker cuts) ───────────────────────────
+
+def compose_podcast_sequential(
+    video_a: str,
+    video_b: str,
+    master_audio: str,
+    timeline: list[dict],
+    output_path: str,
+    overlay: str = "None",
+    custom_overlay_path: str | None = None,
+    orientation: str = "16:9",
+) -> str:
+    """Compose a podcast by cutting to the active speaker at each dialogue turn.
+
+    For each entry in *timeline* (``{"speaker": "A"|"B", "start", "end"}``),
+    the corresponding segment is extracted from *video_a* or *video_b* and the
+    clips are concatenated in order.  The result is combined with *master_audio*.
+    """
+    res_map = {
+        "16:9": (1920, 1080),
+        "9:16": (1080, 1920),
+        "1:1":  (1080, 1080),
+    }
+    W, H = res_map.get(orientation, (1920, 1080))
+    overlay_ff = _OVERLAY_FILTERS.get(overlay, "")
+    total_dur = _get_audio_duration(master_audio)
+
+    if not timeline:
+        raise ValueError("Timeline is empty — cannot build sequential video.")
+
+    work_dir = Path(output_path).parent / "_seq_tmp"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # ── Extract one clip per timeline entry ──────────────────────
+        clip_paths: list[str] = []
+        n = len(timeline)
+        for i, entry in enumerate(timeline):
+            seg_start = entry["start"]
+            # Extend each clip to the next entry's start (covers the inter-turn gap)
+            seg_end = timeline[i + 1]["start"] if i + 1 < n else total_dur
+            if seg_end <= seg_start:
+                seg_end = seg_start + 0.1  # safety: at least 1 frame
+
+            src_video = video_a if entry["speaker"] == "A" else video_b
+            clip_path = str(work_dir / f"clip_{i:03d}.mp4")
+
+            r = subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-i", src_video,
+                    "-ss", str(seg_start),
+                    "-to", str(seg_end),
+                    "-vf", (
+                        f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                        f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black"
+                    ),
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                    "-an", clip_path,
+                ],
+                capture_output=True, text=True, timeout=120,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(
+                    f"Segment {i} extraction failed:\n{r.stderr[-300:]}"
+                )
+            clip_paths.append(clip_path)
+            logger.debug(f"Extracted clip {i}: {entry['speaker']} [{seg_start:.2f}–{seg_end:.2f}s]")
+
+        # ── Concatenate all clips ────────────────────────────────────
+        concat_txt = str(work_dir / "concat.txt")
+        with open(concat_txt, "w") as f:
+            for cp in clip_paths:
+                f.write(f"file '{cp}'\n")
+
+        combined = str(work_dir / "combined.mp4")
+        r = subprocess.run(
+            ["ffmpeg", "-y",
+             "-f", "concat", "-safe", "0", "-i", concat_txt,
+             "-c:v", "copy", "-an", combined],
+            capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"Concat failed:\n{r.stderr[-300:]}")
+
+        # ── Apply overlay & mix audio ────────────────────────────────
+        extra_inputs: list[str] = []
+        if custom_overlay_path and Path(custom_overlay_path).exists():
+            extra_inputs = ["-i", custom_overlay_path]
+
+        if overlay_ff or extra_inputs:
+            # Build a filter_complex for overlay/color effects
+            if extra_inputs:
+                # custom image overlay
+                base = f"[0:v]{overlay_ff}[ov_base]" if overlay_ff else "[0:v]copy[ov_base]"
+                fc = (
+                    f"{base};"
+                    f"[2:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
+                    f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black@0.0,format=rgba[ovl];"
+                    f"[ov_base][ovl]overlay=0:0:format=auto[vout]"
+                )
+            else:
+                fc = f"[0:v]{overlay_ff}[vout]"
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", combined,
+                "-i", master_audio,
+                *extra_inputs,
+                "-filter_complex", fc,
+                "-map", "[vout]",
+                "-map", "1:a",
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest", "-movflags", "+faststart",
+                output_path,
+            ]
+        else:
+            # Fast path: copy video, re-encode audio only
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", combined,
+                "-i", master_audio,
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest", "-movflags", "+faststart",
+                output_path,
+            ]
+
+        logger.info(f"Sequential compose: {n} turns, {W}x{H}, overlay={overlay}")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            raise RuntimeError(f"Final compose failed:\n{r.stderr[-500:]}")
+
+        return output_path
+
+    finally:
+        shutil.rmtree(str(work_dir), ignore_errors=True)
 
 
 # ── Video composition ───────────────────────────────────────────────────────
