@@ -14,7 +14,7 @@ Pipeline (in order):
 
 Public API
 ----------
-``compose_narrated_video(pdf_path, json_data, output_path, voice, pause_seconds)``
+``compose_narrated_video(pdf_path, json_data, output_path, voice, pause_seconds, ...)``
     Generator that yields ``(status_message: str, result_path: str | None)``.
     The final successful yield has ``result_path`` set to the output MP4.
 """
@@ -87,6 +87,21 @@ def _concat_audio(paths: list[str], output_path: str) -> None:
         raise RuntimeError(f"Audio concat failed:\n{r.stderr[-500:]}")
 
 
+def _normalize_audio(input_path: str | Path, output_path: str | Path) -> None:
+    """Convert audio to 16 kHz mono PCM WAV for downstream concat steps."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-ar", "16000",
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        str(output_path),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"Audio normalization failed:\n{r.stderr[-500:]}")
+
+
 # ── Public composer ──────────────────────────────────────────────────────────
 
 def compose_narrated_video(
@@ -95,6 +110,10 @@ def compose_narrated_video(
     output_path: str | Path,
     voice: str = "af_heart",
     pause_seconds: float = DEFAULT_PAUSE,
+    tts_engine: str = "kokoro",
+    mlx_voice_choice: str | None = None,
+    mlx_model_id: str | None = None,
+    mlx_language: str | None = None,
 ) -> Generator[tuple[str, str | None], None, None]:
     """Compose a narrated presentation video.
 
@@ -127,8 +146,15 @@ def compose_narrated_video(
 
         # ── Step 2: TTS — generate narration audio for every slide ───────────
         yield "Loading TTS engine…", None
-        from avatarpipeline.voice.kokoro import VoiceGenerator
-        vg = VoiceGenerator()
+        tts_engine = (tts_engine or "kokoro").strip().lower()
+        vg = None
+        studio = None
+        if tts_engine == "mlx":
+            from avatarpipeline.voice.mlx_voice import MlxVoiceStudio
+            studio = MlxVoiceStudio()
+        else:
+            from avatarpipeline.voice.kokoro import VoiceGenerator
+            vg = VoiceGenerator()
 
         normalized_json = result.json_data
         default_pause = float(normalized_json.get("default_pause_seconds", pause_seconds))
@@ -145,7 +171,25 @@ def compose_narrated_video(
             narration = (entry.get("narration") or "").strip()
             out_wav = str(audio_dir / f"narr_{slide_num:03d}.wav")
             if narration:
-                vg.generate(narration, voice=voice, out_path=out_wav)
+                if tts_engine == "mlx":
+                    if studio is None:
+                        raise RuntimeError("MLX voice studio is not available.")
+                    if not mlx_voice_choice:
+                        raise ValueError("Select a saved MLX voice for Slide Narrator Japanese mode.")
+                    raw_wav = audio_dir / f"narr_{slide_num:03d}_raw.wav"
+                    generated = studio.synthesize_with_voice(
+                        text=narration,
+                        voice_choice=mlx_voice_choice,
+                        model_id=mlx_model_id,
+                        lang_code=mlx_language or "ja",
+                        output_path=str(raw_wav),
+                    )
+                    _normalize_audio(generated, out_wav)
+                    Path(generated).unlink(missing_ok=True)
+                else:
+                    if vg is None:
+                        raise RuntimeError("Kokoro voice generator is not available.")
+                    vg.generate(narration, voice=voice, out_path=out_wav)
             else:
                 _gen_silence(0.1, out_wav)
             narr_paths.append(out_wav)

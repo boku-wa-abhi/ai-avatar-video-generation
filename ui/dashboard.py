@@ -753,6 +753,13 @@ NARRATION_STEP_NAMES = [
     "Encode Slideshow Video",
 ]
 
+NARRATION_TTS_KOKORO = "English — Kokoro TTS"
+NARRATION_TTS_MLX_JA = "Japanese — MLX Saved Voice"
+NARRATION_TTS_CHOICES = [
+    NARRATION_TTS_KOKORO,
+    NARRATION_TTS_MLX_JA,
+]
+
 
 def _build_narration_progress_html(
     step_states: list[str],
@@ -852,6 +859,22 @@ def _narration_validation_html(
     )
 
 
+def _toggle_narration_tts_controls(mode: str | None):
+    use_mlx = mode == NARRATION_TTS_MLX_JA
+    helper = (
+        "Japanese narration uses the local MLX saved-voice engine. "
+        "Save a Japanese reference voice in the Voice Studio tab first, then select it here."
+        if use_mlx
+        else
+        "English narration uses the built-in Kokoro TTS voices."
+    )
+    return (
+        gr.update(visible=not use_mlx),
+        gr.update(visible=use_mlx),
+        gr.update(value=helper),
+    )
+
+
 def validate_narration_files(pdf_file: str | None, json_file: str | None) -> str:
     """Run sync validation and return a styled HTML report."""
     if not pdf_file:
@@ -881,7 +904,10 @@ def validate_narration_files(pdf_file: str | None, json_file: str | None) -> str
 def generate_narration_video(
     pdf_file: str | None,
     json_file: str | None,
+    narration_mode: str,
     voice_choice: str,
+    mlx_voice_choice: str | None,
+    mlx_model_choice: str | None,
     pause_secs: float,
     progress=gr.Progress(track_tqdm=False),
 ):
@@ -925,9 +951,15 @@ def generate_narration_video(
         yield None, render(0, f"Cannot parse JSON: {exc}"), ""
         return
 
+    use_mlx = narration_mode == NARRATION_TTS_MLX_JA
     voice_id = VOICE_CHOICES.get(voice_choice, "af_heart")
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = str(OUTPUT_DIR / f"narration_{run_id}.mp4")
+
+    if use_mlx and not mlx_voice_choice:
+        states[0] = "error"
+        yield None, render(0, "Select a saved Japanese MLX voice first."), ""
+        return
 
     n_slides = 0
     step_starts: dict[int, float] = {}
@@ -937,7 +969,9 @@ def generate_narration_video(
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"PDF: {Path(pdf_file).name}",
         f"JSON: {Path(json_file).name}",
-        f"Voice: {voice_choice}",
+        f"Narration engine: {narration_mode}",
+        f"Voice: {mlx_voice_choice if use_mlx else voice_choice}",
+        f"Model: {mlx_model_choice if use_mlx else 'Kokoro local default'}",
         f"Default pause between slides: {pause_secs}s",
     ]
 
@@ -948,6 +982,10 @@ def generate_narration_video(
             output_path=output_path,
             voice=voice_id,
             pause_seconds=float(pause_secs),
+            tts_engine="mlx" if use_mlx else "kokoro",
+            mlx_voice_choice=mlx_voice_choice if use_mlx else None,
+            mlx_model_id=mlx_model_choice if use_mlx else None,
+            mlx_language="ja" if use_mlx else None,
         )
 
         for msg, result in gen:
@@ -2465,10 +2503,10 @@ with gr.Blocks(title="Avatar Studio") as demo:
             # ── Configuration ────────────────────────────────────────────────
             gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>tune</span> Voice & Timing</div>")
             with gr.Row():
-                narr_voice = gr.Dropdown(
-                    label="Narration Voice (Kokoro TTS)",
-                    choices=list(VOICE_CHOICES.keys()),
-                    value="Heart \u2014 Warm Female (default)",
+                narr_mode = gr.Dropdown(
+                    label="Narration Engine",
+                    choices=NARRATION_TTS_CHOICES,
+                    value=NARRATION_TTS_KOKORO,
                     scale=2,
                 )
                 narr_pause = gr.Slider(
@@ -2479,6 +2517,28 @@ with gr.Blocks(title="Avatar Studio") as demo:
                     value=float(NARRATION_DEFAULT_PAUSE),
                     scale=1,
                 )
+            with gr.Row(visible=True) as narr_kokoro_row:
+                narr_voice = gr.Dropdown(
+                    label="Narration Voice (Kokoro TTS)",
+                    choices=list(VOICE_CHOICES.keys()),
+                    value="Heart \u2014 Warm Female (default)",
+                    scale=2,
+                )
+            with gr.Column(visible=False) as narr_mlx_col:
+                with gr.Row():
+                    narr_mlx_voice = gr.Dropdown(
+                        label="Japanese Saved Voice (MLX)",
+                        choices=_MLX_INITIAL_CHOICES,
+                        value=_MLX_INITIAL_VOICE,
+                        scale=4,
+                    )
+                    narr_mlx_refresh = gr.Button("Refresh Saved Voices", scale=1)
+                narr_mlx_model = gr.Dropdown(
+                    label="Japanese TTS Model",
+                    choices=_MLX_MODEL_LABELS,
+                    value=_MLX_MODEL_LABELS[0],
+                )
+            narr_engine_help = gr.Markdown("English narration uses the built-in Kokoro TTS voices.")
 
             gr.HTML('<div class="divider"></div>')
 
@@ -2528,9 +2588,19 @@ with gr.Blocks(title="Avatar Studio") as demo:
                 inputs=[narr_pdf, narr_json],
                 outputs=[narr_validation_result],
             )
+            narr_mode.change(
+                fn=_toggle_narration_tts_controls,
+                inputs=[narr_mode],
+                outputs=[narr_kokoro_row, narr_mlx_col, narr_engine_help],
+            )
+            narr_mlx_refresh.click(
+                fn=_mlx_voice_dropdown_update,
+                inputs=[narr_mlx_voice],
+                outputs=[narr_mlx_voice],
+            )
             narr_generate_btn.click(
                 fn=generate_narration_video,
-                inputs=[narr_pdf, narr_json, narr_voice, narr_pause],
+                inputs=[narr_pdf, narr_json, narr_mode, narr_voice, narr_mlx_voice, narr_mlx_model, narr_pause],
                 outputs=[narr_output, narr_log, narr_report],
             )
             narr_cancel_btn.click(fn=cancel_generation, outputs=[narr_log])

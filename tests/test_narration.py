@@ -148,3 +148,69 @@ def test_compose_narrated_video_generates_audio_before_render_and_uses_slide_tim
 
     duration = _probe_duration(output_path)
     assert 4.4 <= duration <= 5.2
+
+
+def test_compose_narrated_video_supports_japanese_mlx_voice(tmp_path, monkeypatch):
+    import avatarpipeline.narration.composer as composer
+    import avatarpipeline.voice.mlx_voice as mlx_voice_mod
+
+    pdf_path = tmp_path / "deck.pdf"
+    _make_pdf(pdf_path, 1)
+
+    slide_image = tmp_path / "slide_001.png"
+    Image.new("RGB", (1920, 1080), (90, 35, 130)).save(slide_image)
+
+    calls: list[dict] = []
+
+    def fake_render_slides(_pdf_path, _output_dir):
+        return [slide_image]
+
+    class FakeStudio:
+        def synthesize_with_voice(
+            self,
+            text,
+            voice_choice,
+            model_id=None,
+            lang_code=None,
+            speed=1.0,
+            pitch_shift=0.0,
+            output_path=None,
+        ):
+            calls.append(
+                {
+                    "text": text,
+                    "voice_choice": voice_choice,
+                    "model_id": model_id,
+                    "lang_code": lang_code,
+                }
+            )
+            _write_silence(Path(output_path), 0.8, sample_rate=24000)
+            return str(output_path)
+
+    monkeypatch.setattr(composer, "render_slides", fake_render_slides)
+    monkeypatch.setattr(mlx_voice_mod, "MlxVoiceStudio", FakeStudio)
+
+    json_data = {
+        "slides": [
+            {"slide_number": 1, "narration": "これは日本語のナレーションです。", "duration_seconds": 1.0},
+        ],
+    }
+
+    events = list(
+        composer.compose_narrated_video(
+            pdf_path=pdf_path,
+            json_data=json_data,
+            output_path=tmp_path / "narrated_ja.mp4",
+            pause_seconds=0.0,
+            tts_engine="mlx",
+            mlx_voice_choice="Japanese Narrator [jp-narrator]",
+            mlx_model_id="mlx-community/chatterbox-fp16",
+            mlx_language="ja",
+        )
+    )
+
+    assert calls
+    assert calls[0]["voice_choice"] == "Japanese Narrator [jp-narrator]"
+    assert calls[0]["lang_code"] == "ja"
+    assert calls[0]["model_id"] == "mlx-community/chatterbox-fp16"
+    assert Path(events[-1][1]).exists()
