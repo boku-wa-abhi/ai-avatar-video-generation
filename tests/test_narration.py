@@ -95,6 +95,16 @@ def test_validate_sync_accepts_slide_number_keyed_dict(tmp_path):
     assert result.json_data["slides"][1]["display_seconds"] == 2.5
 
 
+def test_presenter_slide_selection_parser_supports_single_ranges_and_lists():
+    from avatarpipeline.narration.presenter import parse_slide_selection
+
+    assert parse_slide_selection("all", 5) == [1, 2, 3, 4, 5]
+    assert parse_slide_selection("2", 5) == [2]
+    assert parse_slide_selection("1-3", 5) == [1, 2, 3]
+    assert parse_slide_selection("1,2,5", 5) == [1, 2, 5]
+    assert parse_slide_selection("2,1-3,5", 5) == [2, 1, 3, 5]
+
+
 def test_compose_narrated_video_generates_audio_before_render_and_uses_slide_timing(tmp_path, monkeypatch):
     import avatarpipeline.narration.composer as composer
     import avatarpipeline.voice.kokoro as kokoro_mod

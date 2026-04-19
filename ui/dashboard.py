@@ -38,6 +38,7 @@ from avatarpipeline import (
     AVATARS_DIR,
     CAPTIONS_DIR,
     OUTPUT_DIR,
+    PRESENTATIONS_DIR,
 )
 from avatarpipeline.voice.mlx_voice import MlxVoiceStudio
 from avatarpipeline.podcast.composer import (
@@ -54,6 +55,11 @@ from avatarpipeline.podcast.composer import (
 )
 from avatarpipeline.narration.validator import validate_sync as _narration_validate
 from avatarpipeline.narration.composer import compose_narrated_video, DEFAULT_PAUSE as NARRATION_DEFAULT_PAUSE
+from avatarpipeline.narration.presenter import (
+    OUTPUT_MODE_ALL as PRESENTER_OUTPUT_MODE_ALL,
+    OUTPUT_MODE_ONE_BY_ONE as PRESENTER_OUTPUT_MODE_ONE_BY_ONE,
+    compose_slide_presenter_video,
+)
 
 CONFIG_PATH = ROOT / "configs" / "settings.yaml"
 ENV_PATH    = ROOT / ".env"
@@ -137,6 +143,58 @@ def get_avatar_gallery() -> list[str]:
     return sorted(files, key=os.path.getmtime, reverse=True)
 
 
+def get_avatar_choices() -> list[str]:
+    return [Path(path).name for path in get_avatar_gallery()]
+
+
+def _resolve_avatar_choice(choice: str | None) -> str | None:
+    if not choice:
+        return None
+    for path in get_avatar_gallery():
+        if Path(path).name == choice:
+            return path
+    candidate = AVATARS_DIR / choice
+    return str(candidate) if candidate.exists() else None
+
+
+def preview_saved_avatar(choice: str | None) -> tuple[str | None, str]:
+    resolved = _resolve_avatar_choice(choice)
+    if not resolved:
+        return None, "No avatar selected."
+    width, height = _probe_image_size(resolved)
+    return resolved, f"Selected: {Path(resolved).name} ({width}×{height})"
+
+
+def refresh_avatar_dropdown(selected_choice: str | None = None):
+    choices = get_avatar_choices()
+    value = selected_choice if selected_choice in choices else (choices[0] if choices else None)
+    preview, status = preview_saved_avatar(value)
+    return gr.update(choices=choices, value=value), preview, status
+
+
+def save_presenter_avatar(file_path: str | None, selected_choice: str | None = None):
+    if not file_path:
+        return refresh_avatar_dropdown(selected_choice)
+    try:
+        AVATARS_DIR.mkdir(parents=True, exist_ok=True)
+        src = Path(file_path)
+        img = Image.open(file_path).convert("RGBA")
+        ext = src.suffix.lower() if src.suffix.lower() in (".png", ".jpg", ".jpeg") else ".png"
+        dest = AVATARS_DIR / f"{src.stem}{ext}"
+        if ext == ".png":
+            img.save(str(dest), "PNG")
+        else:
+            img.convert("RGB").save(str(dest), "JPEG")
+        choices = get_avatar_choices()
+        value = dest.name if dest.name in choices else (choices[0] if choices else None)
+        preview, _ = preview_saved_avatar(value)
+        status = f"Avatar saved: {dest.name} ({img.width}×{img.height})"
+        return gr.update(choices=choices, value=value), preview, status
+    except Exception as exc:
+        preview, status = preview_saved_avatar(selected_choice)
+        return gr.update(choices=get_avatar_choices(), value=selected_choice), preview, f"Avatar save failed: {exc}"
+
+
 def select_avatar_from_gallery(evt: gr.SelectData) -> tuple[str | None, str]:
     gallery = get_avatar_gallery()
     if evt.index < len(gallery):
@@ -181,6 +239,11 @@ def _aspect_ratio_code_for_image(path: str | Path) -> str | None:
 def open_output_folder() -> str:
     subprocess.Popen(["open", str(OUTPUT_DIR)])
     return f"Opened {OUTPUT_DIR}"
+
+
+def open_presentations_folder() -> str:
+    subprocess.Popen(["open", str(PRESENTATIONS_DIR)])
+    return f"Opened {PRESENTATIONS_DIR}"
 
 
 def generate_voice_preview(voice_display: str) -> str | None:
@@ -779,6 +842,10 @@ NARRATION_TTS_CHOICES = [
     NARRATION_TTS_KOKORO,
     NARRATION_TTS_MLX_JA,
 ]
+PRESENTER_OUTPUT_MODE_CHOICES = [
+    PRESENTER_OUTPUT_MODE_ALL,
+    PRESENTER_OUTPUT_MODE_ONE_BY_ONE,
+]
 NARRATION_JA_SOURCE_KOKORO = "Kokoro Japanese Preset"
 NARRATION_JA_SOURCE_SAVED = "Saved Voice Clone"
 NARRATION_JA_SOURCE_PRESET = "Qwen Preset Voice"
@@ -787,6 +854,15 @@ NARRATION_JA_KOKORO_CHOICES = {
     "Alpha — Japanese Female": "jf_alpha",
     "Gongitsune — Japanese Female": "jf_gongitsune",
 }
+PRESENTER_STEP_NAMES = [
+    "Validate Sync",
+    "Narration Audio",
+    "Presenter Lip-sync",
+    "Save Master Audio",
+    "Render Slides",
+    "Compose Selected Slides",
+    "Export Outputs",
+]
 
 
 def _build_narration_progress_html(
@@ -815,6 +891,39 @@ def _build_narration_progress_html(
         f'<div class="progress-panel">'
         f'<div class="progress-header">'
         f'<span class="material-symbols-outlined">slideshow</span> Narration Pipeline</div>'
+        f'{"".join(rows)}'
+        f'<div class="progress-track"><div class="progress-fill" style="width:{bar_pct}%"></div></div>'
+        f'<div class="progress-elapsed">{elapsed}</div>'
+        f'{footer}'
+        f'</div>'
+    )
+
+
+def _build_presenter_progress_html(
+    step_states: list[str],
+    step_times: list[str],
+    pct: float,
+    elapsed: str,
+    detail: str = "",
+    message: str = "",
+) -> str:
+    rows = []
+    for i, (name, state, t) in enumerate(zip(PRESENTER_STEP_NAMES, step_states, step_times)):
+        icon_name, css_cls = _STEP_ICONS[state]
+        label = f"{name}: {detail}" if i in (1, 2, 5) and detail else name
+        rows.append(
+            f'<div class="step-row {css_cls}">'
+            f'<span class="material-symbols-outlined step-icon-m">{icon_name}</span>'
+            f'<span class="step-name">{label}</span>'
+            f'<span class="step-time-val">{t}</span>'
+            f'</div>'
+        )
+    bar_pct = max(0, min(100, int(pct * 100)))
+    footer = f'<div class="progress-message">{message}</div>' if message else ""
+    return (
+        f'<div class="progress-panel">'
+        f'<div class="progress-header">'
+        f'<span class="material-symbols-outlined">present_to_all</span> Slide Presenter Pipeline</div>'
         f'{"".join(rows)}'
         f'<div class="progress-track"><div class="progress-fill" style="width:{bar_pct}%"></div></div>'
         f'<div class="progress-elapsed">{elapsed}</div>'
@@ -923,6 +1032,16 @@ def _toggle_narration_japanese_source(source_mode: str | None):
         ),
         gr.update(value=helper),
     )
+
+
+def _resolve_presenter_avatar_input(uploaded_avatar: str | None, selected_avatar: str | None) -> str | None:
+    resolved = _resolve_avatar_choice(selected_avatar)
+    if resolved:
+        return resolved
+    if uploaded_avatar and Path(uploaded_avatar).exists():
+        return uploaded_avatar
+    fallback = AVATARS_DIR / "avatar.png"
+    return str(fallback) if fallback.exists() else None
 
 
 def validate_narration_files(pdf_file: str | None, json_file: str | None) -> str:
@@ -1142,6 +1261,246 @@ def generate_narration_video(
         err_msg = str(exc)
         report_lines.append(f"FAILED: {err_msg}")
         yield None, render(0, f"Error: {err_msg[:200]}"), "\n".join(report_lines)
+
+
+def generate_slide_presenter(
+    pdf_file: str | None,
+    json_file: str | None,
+    avatar_upload: str | None,
+    avatar_choice: str | None,
+    project_tag: str,
+    slide_selection: str,
+    output_mode: str,
+    narration_mode: str,
+    voice_choice: str,
+    japanese_source_mode: str | None,
+    mlx_voice_choice: str | None,
+    mlx_preset_voice: str | None,
+    kokoro_ja_voice: str | None,
+    mlx_model_choice: str | None,
+    pause_secs: float,
+    lipsync_engine: str,
+    enhance_face: bool,
+    mt_batch_size: int = 8,
+    mt_bbox_shift: int = 0,
+    st_expression_scale: float = 1.0,
+    st_pose_style: int = 0,
+    st_still: bool = True,
+    st_preprocess: str = "full",
+    progress=gr.Progress(track_tqdm=False),
+):
+    _cancel_event.clear()
+    wall_start = time.time()
+    total = len(PRESENTER_STEP_NAMES)
+    states = ["waiting"] * total
+    times = [""] * total
+    detail = ""
+
+    def elapsed_str() -> str:
+        s = int(time.time() - wall_start)
+        return f"{s // 60}m {s % 60:02d}s"
+
+    def step_time(t0: float) -> str:
+        d = time.time() - t0
+        return f"{d:.1f}s" if d < 60 else f"{int(d) // 60}m {int(d) % 60}s"
+
+    def render(pct: float, msg: str = "") -> str:
+        return _build_presenter_progress_html(states, times, pct, elapsed_str(), detail, msg)
+
+    if not pdf_file:
+        states[0] = "error"
+        yield None, render(0, "Upload a PDF file."), "", []
+        return
+    if not json_file:
+        states[0] = "error"
+        yield None, render(0, "Upload a JSON narration file."), "", []
+        return
+
+    avatar_path = _resolve_presenter_avatar_input(avatar_upload, avatar_choice)
+    if not avatar_path:
+        states[0] = "error"
+        yield None, render(0, "Upload or select a presenter avatar first."), "", []
+        return
+
+    try:
+        with open(json_file) as f:
+            json_data = _json.load(f)
+    except Exception as exc:
+        states[0] = "error"
+        yield None, render(0, f"Cannot parse JSON: {exc}"), "", []
+        return
+
+    use_mlx = narration_mode == NARRATION_TTS_MLX_JA
+    use_kokoro_ja = use_mlx and japanese_source_mode == NARRATION_JA_SOURCE_KOKORO
+    use_preset_voice = use_mlx and japanese_source_mode == NARRATION_JA_SOURCE_PRESET
+    voice_id = VOICE_CHOICES.get(voice_choice, "af_heart")
+
+    if use_kokoro_ja and not kokoro_ja_voice:
+        states[0] = "error"
+        yield None, render(0, "Select a Japanese Kokoro voice first."), "", []
+        return
+    if use_mlx and use_preset_voice and not mlx_preset_voice:
+        states[0] = "error"
+        yield None, render(0, "Select a Japanese Qwen preset voice first."), "", []
+        return
+    if use_mlx and not use_preset_voice and not use_kokoro_ja and not mlx_voice_choice:
+        states[0] = "error"
+        yield None, render(0, "Select a saved Japanese MLX voice first."), "", []
+        return
+
+    selected_voice = (
+        kokoro_ja_voice
+        if use_kokoro_ja
+        else mlx_preset_voice
+        if use_preset_voice
+        else mlx_voice_choice
+        if use_mlx
+        else voice_choice
+    )
+    selected_model = (
+        "Kokoro Japanese preset"
+        if use_kokoro_ja
+        else mlx_model_choice
+        if use_mlx
+        else "Kokoro local default"
+    )
+
+    report_lines = [
+        "Slide Presenter Report",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"PDF: {Path(pdf_file).name}",
+        f"JSON: {Path(json_file).name}",
+        f"Avatar: {Path(avatar_path).name}",
+        f"Project tag: {(project_tag or Path(pdf_file).stem).strip()}",
+        f"Slide selection: {slide_selection or 'all'}",
+        f"Output mode: {output_mode}",
+        f"Narration engine: {narration_mode}",
+        f"Japanese voice source: {japanese_source_mode}" if use_mlx else "Japanese voice source: n/a",
+        f"Voice: {selected_voice}",
+        f"Model: {selected_model}",
+        f"Lip-sync engine: {lipsync_engine}",
+    ]
+
+    step_starts: dict[int, float] = {}
+    preview_video = None
+    generated_files: list[str] = []
+
+    try:
+        states[0] = "active"
+        step_starts[0] = time.time()
+        progress(0.02, desc="Validating PDF and JSON")
+        yield None, render(0.02, "Validating PDF and JSON"), "\n".join(report_lines), generated_files
+
+        gen = compose_slide_presenter_video(
+            pdf_path=pdf_file,
+            json_data=json_data,
+            avatar_path=avatar_path,
+            project_tag=project_tag or Path(pdf_file).stem,
+            slide_selection=slide_selection or "all",
+            output_mode=output_mode,
+            voice=NARRATION_JA_KOKORO_CHOICES.get(kokoro_ja_voice or "", "jm_kumo") if use_kokoro_ja else voice_id,
+            pause_seconds=float(pause_secs),
+            tts_engine="mlx" if (use_mlx and not use_kokoro_ja) else "kokoro",
+            mlx_voice_choice=mlx_voice_choice if (use_mlx and not use_preset_voice and not use_kokoro_ja) else None,
+            mlx_preset_voice=mlx_preset_voice if use_preset_voice else None,
+            mlx_model_id=mlx_model_choice if (use_mlx and not use_kokoro_ja) else None,
+            mlx_language="ja" if use_mlx else None,
+            lipsync_engine={"MuseTalk 1.5": "musetalk", "SadTalker 256px": "sadtalker", "SadTalker HD": "sadtalker_hd"}.get(lipsync_engine, "musetalk"),
+            enhance_face=bool(enhance_face),
+            mt_batch_size=int(mt_batch_size),
+            mt_bbox_shift=int(mt_bbox_shift),
+            st_expression_scale=float(st_expression_scale),
+            st_pose_style=int(st_pose_style),
+            st_still=bool(st_still),
+            st_preprocess=st_preprocess,
+        )
+
+        for msg, payload in gen:
+            if _cancel_event.is_set():
+                yield None, render(0, "Cancelled."), "\n".join(report_lines), generated_files
+                return
+
+            if msg.startswith("Validation passed"):
+                states[0] = "done"
+                times[0] = step_time(step_starts.get(0, time.time()))
+                states[1] = "active"
+                step_starts.setdefault(1, time.time())
+            elif msg.startswith("Generating narration audio") or msg.startswith("Reusing narration audio"):
+                if states[0] == "waiting":
+                    states[0] = "active"
+                    step_starts[0] = time.time()
+                if states[1] == "waiting":
+                    states[1] = "active"
+                    step_starts[1] = time.time()
+                detail = msg
+            elif msg.startswith("Generating lip-sync presenter") or msg.startswith("Reusing lip-sync presenter") or msg.startswith("Enhancing presenter clip"):
+                if states[1] == "active":
+                    states[1] = "done"
+                    times[1] = step_time(step_starts.get(1, time.time()))
+                states[2] = "active"
+                step_starts.setdefault(2, time.time())
+                detail = msg
+            elif msg.startswith("Building master audio"):
+                if states[2] == "active":
+                    states[2] = "done"
+                    times[2] = step_time(step_starts.get(2, time.time()))
+                states[3] = "active"
+                step_starts.setdefault(3, time.time())
+                detail = ""
+            elif msg.startswith("Rendering slides"):
+                if states[3] == "active":
+                    states[3] = "done"
+                    times[3] = step_time(step_starts.get(3, time.time()))
+                states[4] = "active"
+                step_starts.setdefault(4, time.time())
+                detail = ""
+            elif msg.startswith("Composing slide"):
+                if states[4] == "active":
+                    states[4] = "done"
+                    times[4] = step_time(step_starts.get(4, time.time()))
+                states[5] = "active"
+                step_starts.setdefault(5, time.time())
+                detail = msg
+            elif msg.startswith("Exporting combined"):
+                if states[5] == "active":
+                    states[5] = "done"
+                    times[5] = step_time(step_starts.get(5, time.time()))
+                states[6] = "active"
+                step_starts.setdefault(6, time.time())
+                detail = ""
+            elif msg == "Done!" and payload:
+                if states[5] == "active":
+                    states[5] = "done"
+                    times[5] = step_time(step_starts.get(5, time.time()))
+                if states[6] == "active":
+                    states[6] = "done"
+                    times[6] = step_time(step_starts.get(6, time.time()))
+                elif states[6] == "waiting":
+                    states[6] = "skipped"
+                    times[6] = "—"
+                preview_video = payload.get("preview_video")
+                generated_files = payload.get("generated_files", [])
+                report_lines.append(payload.get("report", ""))
+
+            done_count = states.count("done") + states.count("skipped")
+            pct = min(0.98, max(0.03, done_count / total))
+            progress(pct, desc=msg)
+            yield preview_video, render(pct, msg), "\n".join(line for line in report_lines if line), generated_files
+
+        if preview_video:
+            yield preview_video, render(1.0, "Complete!"), "\n".join(line for line in report_lines if line), generated_files
+        else:
+            yield None, render(0, "No output was produced."), "\n".join(report_lines), generated_files
+
+    except Exception as exc:
+        for i, state in enumerate(states):
+            if state == "active":
+                states[i] = "error"
+                break
+        err_msg = str(exc)
+        report_lines.append(f"FAILED: {err_msg}")
+        logger.error(f"Slide presenter generation failed: {exc}")
+        yield preview_video, render(0, f"Error: {err_msg[:220]}"), "\n".join(report_lines), generated_files
 
 
 def save_podcast_avatar(file_path: str | None, speaker_id: str) -> str:
@@ -2699,6 +3058,341 @@ with gr.Blocks(title="Avatar Studio") as demo:
             )
             narr_cancel_btn.click(fn=cancel_generation, outputs=[narr_log])
             narr_open_folder.click(fn=open_output_folder, outputs=[narr_folder_status])
+
+        # ══════════════════════════════════════════════════════════════════════
+        # Tab 7 — Slide Presenter
+        # ══════════════════════════════════════════════════════════════════════
+        presenter_avatar_choices = get_avatar_choices()
+        presenter_avatar_default = presenter_avatar_choices[0] if presenter_avatar_choices else None
+        presenter_avatar_initial, presenter_avatar_status_initial = preview_saved_avatar(presenter_avatar_default)
+
+        with gr.TabItem("Slide Presenter", id="tab-slide-presenter"):
+            gr.HTML(
+                "<div class='section-title'>"
+                "<span class='material-symbols-outlined'>present_to_all</span>"
+                " PDF + JSON Slide Presenter with Lip-sync</div>"
+            )
+            gr.Markdown(
+                "Create a narrated slide video with a lip-synced presenter overlaid in the **bottom-left corner**. "
+                "This tab keeps per-slide narration audio, presenter lip-sync clips, master audio, and slide composites "
+                "under `data/presentations/<project-tag>` so you can rerender later against a revised PDF without throwing away the expensive avatar work."
+            )
+
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>upload_file</span> Inputs</div>")
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=1):
+                    presenter_pdf = gr.File(
+                        label="PDF File (.pdf)",
+                        file_types=[".pdf"],
+                        file_count="single",
+                    )
+                with gr.Column(scale=1):
+                    presenter_json = gr.File(
+                        label="Narration JSON File",
+                        file_types=[".json"],
+                        file_count="single",
+                    )
+
+            gr.HTML(
+                "<div style='font-size:0.8rem;color:var(--g-on-surface-variant);margin:-8px 0 12px'>"
+                "Slide selection examples: <code>all</code>, <code>1</code>, <code>1-3</code>, <code>1,2,5</code>. "
+                "Per-slide assets are cached by project tag, narration settings, and avatar, so regenerating a revised PDF only rerenders the slide composites when possible."
+                "</div>"
+            )
+
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>face</span> Presenter Avatar</div>")
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=1, min_width=280):
+                    presenter_avatar_upload = gr.Image(
+                        label="Upload Presenter Avatar",
+                        type="filepath",
+                        sources=["upload", "clipboard"],
+                        height=190,
+                        elem_classes=["avatar-display"],
+                    )
+                    with gr.Row():
+                        presenter_avatar_save_btn = gr.Button("Save Uploaded Avatar", size="sm", variant="secondary")
+                        presenter_avatar_refresh_btn = gr.Button("Refresh Saved Avatars", size="sm", variant="secondary")
+                    presenter_avatar_choice = gr.Dropdown(
+                        label="Saved Presenter Avatar",
+                        choices=presenter_avatar_choices,
+                        value=presenter_avatar_default,
+                    )
+                    presenter_avatar_status = gr.Textbox(
+                        interactive=False,
+                        lines=2,
+                        value=presenter_avatar_status_initial,
+                    )
+                with gr.Column(scale=1, min_width=280):
+                    presenter_avatar_preview = gr.Image(
+                        label="Selected Presenter",
+                        type="filepath",
+                        value=presenter_avatar_initial,
+                        interactive=False,
+                        height=320,
+                        elem_classes=["avatar-display"],
+                    )
+
+            gr.HTML('<div class="divider"></div>')
+
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>rule</span> Validation</div>")
+            presenter_validate_btn = gr.Button(
+                "▶  Validate Files",
+                size="sm",
+                variant="secondary",
+            )
+            presenter_validation_result = gr.HTML(
+                value="<div style='color:var(--g-on-surface-variant);font-size:0.85rem;padding:10px 0'>"
+                      "Upload the PDF and JSON, then validate before generating the presenter pipeline.</div>",
+            )
+
+            gr.HTML('<div class="divider"></div>')
+
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>tune</span> Project & Output Scope</div>")
+            with gr.Row():
+                presenter_project_tag = gr.Textbox(
+                    label="Project Tag",
+                    placeholder="Optional. Reuse the same tag when you want to keep presenter audio/lip-sync assets across PDF revisions.",
+                    scale=2,
+                )
+                presenter_slide_selection = gr.Textbox(
+                    label="Slides to Render",
+                    value="all",
+                    placeholder="Examples: all, 1, 1-3, 1,2,5",
+                    scale=2,
+                )
+                presenter_output_mode = gr.Radio(
+                    label="Output Mode",
+                    choices=PRESENTER_OUTPUT_MODE_CHOICES,
+                    value=PRESENTER_OUTPUT_MODE_ONE_BY_ONE,
+                    scale=2,
+                )
+
+            gr.HTML('<div class="divider"></div>')
+
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>record_voice_over</span> Narration</div>")
+            with gr.Row():
+                presenter_mode = gr.Dropdown(
+                    label="Narration Engine",
+                    choices=NARRATION_TTS_CHOICES,
+                    value=NARRATION_TTS_KOKORO,
+                    scale=2,
+                )
+                presenter_pause = gr.Slider(
+                    label="Pause between slides (seconds)",
+                    minimum=0.0,
+                    maximum=5.0,
+                    step=0.5,
+                    value=float(NARRATION_DEFAULT_PAUSE),
+                    scale=1,
+                )
+            with gr.Row(visible=True) as presenter_kokoro_row:
+                presenter_voice = gr.Dropdown(
+                    label="Narration Voice (Kokoro TTS)",
+                    choices=list(VOICE_CHOICES.keys()),
+                    value="Heart — Warm Female (default)",
+                    scale=2,
+                )
+            with gr.Column(visible=False) as presenter_mlx_col:
+                presenter_ja_source = gr.Radio(
+                    label="Japanese Voice Source",
+                    choices=[NARRATION_JA_SOURCE_KOKORO, NARRATION_JA_SOURCE_PRESET, NARRATION_JA_SOURCE_SAVED],
+                    value=NARRATION_JA_SOURCE_KOKORO,
+                )
+                with gr.Row():
+                    with gr.Column(visible=False) as presenter_mlx_saved_col:
+                        presenter_mlx_voice = gr.Dropdown(
+                            label="Japanese Saved Voice (MLX)",
+                            choices=_MLX_INITIAL_CHOICES,
+                            value=_MLX_INITIAL_VOICE,
+                            scale=4,
+                        )
+                    with gr.Column(visible=True) as presenter_mlx_preset_col:
+                        presenter_mlx_preset = gr.Dropdown(
+                            label="Japanese Preset Voice (Qwen)",
+                            choices=_MLX_PRESET_VOICE_LABELS,
+                            value="Ono_Anna — Japanese Female (native)",
+                            scale=4,
+                        )
+                    with gr.Column(visible=True) as presenter_kokoro_ja_col:
+                        presenter_kokoro_ja_voice = gr.Dropdown(
+                            label="Japanese Preset Voice (Kokoro)",
+                            choices=list(NARRATION_JA_KOKORO_CHOICES.keys()),
+                            value="Kumo — Japanese Male (default)",
+                            scale=4,
+                        )
+                    presenter_mlx_refresh = gr.Button("Refresh Saved Voices", scale=1)
+                presenter_ja_source_help = gr.Markdown(
+                    "Using Kokoro's Japanese preset voices. Kumo is the default native Japanese male voice."
+                )
+                presenter_mlx_model = gr.Dropdown(
+                    label="Japanese TTS Model",
+                    choices=_MLX_MODEL_LABELS,
+                    value=_MLX_DEFAULT_CLONE_MODEL_LABEL,
+                )
+            presenter_engine_help = gr.Markdown("English narration uses the built-in Kokoro TTS voices.")
+
+            gr.HTML('<div class="divider"></div>')
+
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>lips</span> Presenter Lip-sync</div>")
+            with gr.Accordion("Advanced Presenter Controls", open=False):
+                presenter_lipsync_engine = gr.Radio(
+                    label="Lip-sync Engine",
+                    choices=["MuseTalk 1.5", "SadTalker 256px", "SadTalker HD"],
+                    value="MuseTalk 1.5",
+                )
+                with gr.Column(visible=True) as presenter_mt_params:
+                    with gr.Row():
+                        presenter_mt_batch = gr.Slider(label="Batch Size", minimum=1, maximum=16, step=1, value=8)
+                        presenter_mt_bbox = gr.Slider(label="Lip Region Shift", minimum=-10, maximum=10, step=1, value=0)
+                with gr.Column(visible=False) as presenter_st_params:
+                    with gr.Row():
+                        presenter_st_expr = gr.Slider(label="Expression Scale", minimum=0.5, maximum=3.0, step=0.1, value=1.0)
+                        presenter_st_pose = gr.Slider(label="Pose Style", minimum=0, maximum=45, step=1, value=0)
+                    with gr.Row():
+                        presenter_st_still = gr.Checkbox(label="Still mode", value=True)
+                        presenter_st_preprocess = gr.Dropdown(
+                            label="Preprocess",
+                            choices=["crop", "extcrop", "resize", "full", "extfull"],
+                            value="full",
+                        )
+                presenter_enhance = gr.Checkbox(label="Face enhancement", value=True)
+
+            gr.HTML('<div class="divider"></div>')
+
+            gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>movie</span> Generate</div>")
+            with gr.Row():
+                presenter_generate_btn = gr.Button(
+                    "Generate Slide Presenter",
+                    variant="primary",
+                    elem_classes=["g-btn-primary"],
+                    scale=3,
+                )
+                presenter_cancel_btn = gr.Button(
+                    "Cancel",
+                    variant="stop",
+                    elem_classes=["g-btn-danger"],
+                    scale=1,
+                )
+
+            presenter_log = gr.HTML(
+                value=(
+                    "<div class='progress-panel'>"
+                    "<div class='progress-header'><span class='material-symbols-outlined'>present_to_all</span> Slide Presenter Pipeline</div>"
+                    "<div style='color:var(--g-on-surface-variant);font-size:0.85rem;padding:12px 0'>"
+                    "Ready — validate the PDF/JSON pair, select an avatar, and click Generate."
+                    "</div></div>"
+                )
+            )
+
+            with gr.Row():
+                presenter_output = gr.Video(
+                    label="Preview Video",
+                    height=440,
+                    scale=2,
+                )
+                with gr.Column(scale=1):
+                    presenter_report = gr.Textbox(
+                        label="Report",
+                        lines=15,
+                        interactive=False,
+                        placeholder="Generation report and reusable project details will appear here…",
+                    )
+                    presenter_files = gr.File(
+                        label="Generated Assets",
+                        file_count="multiple",
+                    )
+                    presenter_open_folder = gr.Button("Open Presentations Folder", size="sm", variant="secondary")
+                    presenter_folder_status = gr.Textbox(
+                        label="",
+                        interactive=False,
+                        lines=1,
+                        show_label=False,
+                        visible=True,
+                    )
+
+            presenter_validate_btn.click(
+                fn=validate_narration_files,
+                inputs=[presenter_pdf, presenter_json],
+                outputs=[presenter_validation_result],
+            )
+            presenter_avatar_upload.change(
+                fn=save_presenter_avatar,
+                inputs=[presenter_avatar_upload, presenter_avatar_choice],
+                outputs=[presenter_avatar_choice, presenter_avatar_preview, presenter_avatar_status],
+            )
+            presenter_avatar_save_btn.click(
+                fn=save_presenter_avatar,
+                inputs=[presenter_avatar_upload, presenter_avatar_choice],
+                outputs=[presenter_avatar_choice, presenter_avatar_preview, presenter_avatar_status],
+            )
+            presenter_avatar_refresh_btn.click(
+                fn=refresh_avatar_dropdown,
+                inputs=[presenter_avatar_choice],
+                outputs=[presenter_avatar_choice, presenter_avatar_preview, presenter_avatar_status],
+            )
+            presenter_avatar_choice.change(
+                fn=preview_saved_avatar,
+                inputs=[presenter_avatar_choice],
+                outputs=[presenter_avatar_preview, presenter_avatar_status],
+            )
+            presenter_mode.change(
+                fn=_toggle_narration_tts_controls,
+                inputs=[presenter_mode],
+                outputs=[presenter_kokoro_row, presenter_mlx_col, presenter_engine_help],
+            )
+            presenter_ja_source.change(
+                fn=_toggle_narration_japanese_source,
+                inputs=[presenter_ja_source],
+                outputs=[
+                    presenter_mlx_saved_col,
+                    presenter_mlx_preset_col,
+                    presenter_kokoro_ja_col,
+                    presenter_mlx_model,
+                    presenter_ja_source_help,
+                ],
+            )
+            presenter_mlx_refresh.click(
+                fn=_mlx_voice_dropdown_update,
+                inputs=[presenter_mlx_voice],
+                outputs=[presenter_mlx_voice],
+            )
+            presenter_lipsync_engine.change(
+                fn=_toggle_lipsync_params,
+                inputs=[presenter_lipsync_engine],
+                outputs=[presenter_mt_params, presenter_st_params],
+            )
+            presenter_generate_btn.click(
+                fn=generate_slide_presenter,
+                inputs=[
+                    presenter_pdf,
+                    presenter_json,
+                    presenter_avatar_upload,
+                    presenter_avatar_choice,
+                    presenter_project_tag,
+                    presenter_slide_selection,
+                    presenter_output_mode,
+                    presenter_mode,
+                    presenter_voice,
+                    presenter_ja_source,
+                    presenter_mlx_voice,
+                    presenter_mlx_preset,
+                    presenter_kokoro_ja_voice,
+                    presenter_mlx_model,
+                    presenter_pause,
+                    presenter_lipsync_engine,
+                    presenter_enhance,
+                    presenter_mt_batch,
+                    presenter_mt_bbox,
+                    presenter_st_expr,
+                    presenter_st_pose,
+                    presenter_st_still,
+                    presenter_st_preprocess,
+                ],
+                outputs=[presenter_output, presenter_log, presenter_report, presenter_files],
+            )
+            presenter_cancel_btn.click(fn=cancel_generation, outputs=[presenter_log])
+            presenter_open_folder.click(fn=open_presentations_folder, outputs=[presenter_folder_status])
 
     # ── Settings ─────────────────────────────────────────────────────────────
     with gr.Accordion("Settings", open=False):
