@@ -1044,6 +1044,12 @@ def _resolve_presenter_avatar_input(uploaded_avatar: str | None, selected_avatar
     return str(fallback) if fallback.exists() else None
 
 
+def _presenter_enhance_enabled(choice: str | bool | None) -> bool:
+    if isinstance(choice, bool):
+        return choice
+    return str(choice or "").strip().lower() == "yes"
+
+
 def validate_narration_files(pdf_file: str | None, json_file: str | None) -> str:
     """Run sync validation and return a styled HTML report."""
     if not pdf_file:
@@ -1280,7 +1286,7 @@ def generate_slide_presenter(
     mlx_model_choice: str | None,
     pause_secs: float,
     lipsync_engine: str,
-    enhance_face: bool,
+    enhance_face: str | bool,
     mt_batch_size: int = 8,
     mt_bbox_shift: int = 0,
     st_expression_scale: float = 1.0,
@@ -1406,7 +1412,7 @@ def generate_slide_presenter(
             mlx_model_id=mlx_model_choice if (use_mlx and not use_kokoro_ja) else None,
             mlx_language="ja" if use_mlx else None,
             lipsync_engine={"MuseTalk 1.5": "musetalk", "SadTalker 256px": "sadtalker", "SadTalker HD": "sadtalker_hd"}.get(lipsync_engine, "musetalk"),
-            enhance_face=bool(enhance_face),
+            enhance_face=_presenter_enhance_enabled(enhance_face),
             mt_batch_size=int(mt_batch_size),
             mt_bbox_shift=int(mt_bbox_shift),
             st_expression_scale=float(st_expression_scale),
@@ -3235,12 +3241,14 @@ with gr.Blocks(title="Avatar Studio") as demo:
             gr.HTML('<div class="divider"></div>')
 
             gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>lips</span> Presenter Lip-sync</div>")
-            presenter_enhance = gr.Checkbox(
-                label="Enhance presenter face after lip-sync (GFPGAN / CodeFormer)",
-                value=True,
+            presenter_enhance = gr.Radio(
+                label="Enhance presenter face after lip-sync",
+                choices=["Yes", "No"],
+                value="No",
             )
             gr.Markdown(
-                "Applies to all three lip-sync engines here: **MuseTalk 1.5**, **SadTalker 256px**, and **SadTalker HD**."
+                "Select **Yes** to run face enhancement after lip-sync. Select **No** to keep the raw lip-sync output. "
+                "Applies to **MuseTalk 1.5**, **SadTalker 256px**, and **SadTalker HD**."
             )
             with gr.Accordion("Advanced Presenter Controls", open=False):
                 presenter_lipsync_engine = gr.Radio(
