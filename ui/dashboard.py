@@ -3235,6 +3235,13 @@ with gr.Blocks(title="Avatar Studio") as demo:
             gr.HTML('<div class="divider"></div>')
 
             gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>lips</span> Presenter Lip-sync</div>")
+            presenter_enhance = gr.Checkbox(
+                label="Enhance presenter face after lip-sync (GFPGAN / CodeFormer)",
+                value=True,
+            )
+            gr.Markdown(
+                "Applies to all three lip-sync engines here: **MuseTalk 1.5**, **SadTalker 256px**, and **SadTalker HD**."
+            )
             with gr.Accordion("Advanced Presenter Controls", open=False):
                 presenter_lipsync_engine = gr.Radio(
                     label="Lip-sync Engine",
@@ -3256,7 +3263,6 @@ with gr.Blocks(title="Avatar Studio") as demo:
                             choices=["crop", "extcrop", "resize", "full", "extfull"],
                             value="full",
                         )
-                presenter_enhance = gr.Checkbox(label="Face enhancement", value=True)
 
             gr.HTML('<div class="divider"></div>')
 
