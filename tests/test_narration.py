@@ -105,6 +105,110 @@ def test_presenter_slide_selection_parser_supports_single_ranges_and_lists():
     assert parse_slide_selection("2,1-3,5", 5) == [2, 1, 3, 5]
 
 
+def test_presenter_overlay_handles_odd_slide_dimensions(tmp_path):
+    from avatarpipeline.narration.presenter import _compose_presenter_overlay
+
+    slide_path = tmp_path / "slide.png"
+    presenter_path = tmp_path / "presenter.mp4"
+    output_path = tmp_path / "composite.mp4"
+
+    Image.new("RGB", (641, 361), (240, 240, 240)).save(slide_path)
+
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=c=white:s=201x201:d=0.4:r=25",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000:duration=0.4",
+            "-c:v", "mpeg4",
+            "-c:a", "aac",
+            str(presenter_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    result = _compose_presenter_overlay(slide_path, presenter_path, output_path)
+
+    assert Path(result).exists()
+    dims = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0",
+            str(output_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert dims == "1920,1080"
+
+
+def test_presenter_reuses_numbered_slide_renders_for_same_pdf_hash(tmp_path, monkeypatch):
+    import avatarpipeline.narration.presenter as presenter
+
+    pdf_path = tmp_path / "deck.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%stub\n")
+    render_dir = tmp_path / "slides"
+    calls: list[str] = []
+
+    def fake_render_slides(_pdf_path, _output_dir):
+        calls.append("render")
+        paths = []
+        for idx in range(2):
+            out = Path(_output_dir) / f"page_{idx + 1:03d}.png"
+            Image.new("RGB", (1280, 720), (30 + idx * 40, 60, 120)).save(out)
+            paths.append(out)
+        return paths
+
+    monkeypatch.setattr(presenter, "render_slides", fake_render_slides)
+
+    first_paths, first_reused = presenter._ensure_rendered_slides(pdf_path, render_dir, 2, "hash-1")
+    second_paths, second_reused = presenter._ensure_rendered_slides(pdf_path, render_dir, 2, "hash-1")
+
+    assert calls == ["render"]
+    assert not first_reused
+    assert second_reused
+    assert [path.name for path in first_paths] == ["slide_001.png", "slide_002.png"]
+    assert [path.name for path in second_paths] == ["slide_001.png", "slide_002.png"]
+
+
+def test_presenter_overlay_supports_optional_logo(tmp_path):
+    from avatarpipeline.narration.presenter import _compose_presenter_overlay
+
+    slide_path = tmp_path / "slide.png"
+    presenter_path = tmp_path / "presenter.mp4"
+    logo_path = tmp_path / "logo.png"
+    output_path = tmp_path / "composite_with_logo.mp4"
+
+    Image.new("RGB", (1280, 720), (245, 245, 245)).save(slide_path)
+    Image.new("RGBA", (420, 120), (24, 120, 80, 255)).save(logo_path)
+
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=c=white:s=300x300:d=0.4:r=25",
+            "-f", "lavfi", "-i", "sine=frequency=660:sample_rate=16000:duration=0.4",
+            "-c:v", "mpeg4",
+            "-c:a", "aac",
+            str(presenter_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    result = _compose_presenter_overlay(
+        slide_path,
+        presenter_path,
+        output_path,
+        logo_image=logo_path,
+    )
+
+    assert Path(result).exists()
+
+
 def test_compose_narrated_video_generates_audio_before_render_and_uses_slide_timing(tmp_path, monkeypatch):
     import avatarpipeline.narration.composer as composer
     import avatarpipeline.voice.kokoro as kokoro_mod

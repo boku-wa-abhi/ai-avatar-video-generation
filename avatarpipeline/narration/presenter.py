@@ -34,6 +34,7 @@ DEFAULT_SELECTION = "all"
 DEFAULT_OUTPUT_MODE = "Output everything"
 OUTPUT_MODE_ALL = "Output everything"
 OUTPUT_MODE_ONE_BY_ONE = "Output one by one"
+PRESENTER_LAYOUT_VERSION = "consulting_left_presenter_v1"
 
 
 def _sha1_text(text: str) -> str:
@@ -217,13 +218,52 @@ def _save_manifest(manifest_path: Path, manifest: dict) -> None:
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=True))
 
 
-def _ensure_rendered_slides(pdf_path: str | Path, render_dir: Path, slide_count: int) -> list[Path]:
-    existing = sorted(render_dir.glob("page_*.png"))
-    if len(existing) == slide_count:
-        return existing
+def _copy_source_file(source_path: str | Path, dest_dir: Path) -> Path:
+    source_path = Path(source_path).expanduser().resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / source_path.name
+    if source_path != dest:
+        shutil.copy2(source_path, dest)
+    return dest
+
+
+def _write_json_source(json_data: dict | list, dest_path: Path) -> Path:
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_text(json.dumps(json_data, indent=2, ensure_ascii=False))
+    return dest_path
+
+
+def _existing_path(path_value: str | Path | None) -> Path | None:
+    if not path_value:
+        return None
+    path = Path(path_value).expanduser()
+    return path.resolve() if path.exists() else None
+
+
+def _ensure_rendered_slides(
+    pdf_path: str | Path,
+    render_dir: Path,
+    slide_count: int,
+    pdf_hash: str,
+) -> tuple[list[Path], bool]:
+    existing = sorted(render_dir.glob("slide_*.png"))
+    hash_marker = render_dir / ".pdf_hash"
+    existing_hash = hash_marker.read_text().strip() if hash_marker.exists() else ""
+    if existing_hash == pdf_hash and len(existing) == slide_count:
+        return existing, True
     if render_dir.exists():
         shutil.rmtree(render_dir, ignore_errors=True)
-    return render_slides(pdf_path, render_dir)
+    render_dir.mkdir(parents=True, exist_ok=True)
+
+    rendered = render_slides(pdf_path, render_dir)
+    renamed: list[Path] = []
+    for idx, path in enumerate(rendered, start=1):
+        dest = render_dir / f"slide_{idx:03d}.png"
+        if path != dest:
+            path.replace(dest)
+        renamed.append(dest)
+    hash_marker.write_text(pdf_hash)
+    return renamed, False
 
 
 def _copy_avatar_to_project(avatar_path: str | Path, avatar_dir: Path) -> Path:
@@ -239,6 +279,7 @@ def _compose_presenter_overlay(
     slide_image: str | Path,
     presenter_video: str | Path,
     output_path: str | Path,
+    logo_image: str | Path | None = None,
     bottom_margin: int = 36,
     left_margin: int = 40,
     width_ratio: float = 0.28,
@@ -249,31 +290,68 @@ def _compose_presenter_overlay(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     dims = _video_info(presenter_video)
-    # Use the rendered slide dimensions directly as the canvas.
-    from PIL import Image
+    canvas_w, canvas_h = 1920, 1080
+    header_h = 108
+    content_x, content_y = 360, 170
+    content_w, content_h = 1460, 660
+    slide_pad = 28
+    slide_w = content_w - slide_pad * 2
+    slide_h = content_h - slide_pad * 2
 
-    with Image.open(slide_image) as img:
-        canvas_w, canvas_h = img.width, img.height
+    speaker_panel_x = 72
+    speaker_panel_y = 602
+    speaker_panel_w = 300
+    speaker_panel_h = 300
+    presenter_w = 280
+    presenter_x = speaker_panel_x + (speaker_panel_w - presenter_w) // 2
+    presenter_y_expr = f"{speaker_panel_y + speaker_panel_h - 12}-overlay_h"
 
-    overlay_w = max(220, int(canvas_w * width_ratio))
-    x = max(20, left_margin)
+    logo_path = _existing_path(logo_image)
+    logo_h = 50
+    logo_x = 96
+    logo_y = (header_h - logo_h) // 2
+    fps = max(1.0, float(dims.get("fps", 25.0)))
 
     cmd = [
         "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"color=c=white:s={canvas_w}x{canvas_h}:r={fps}",
         "-loop", "1", "-i", str(slide_image),
         "-i", str(presenter_video),
-        "-filter_complex",
+    ]
+    filter_parts = [
         (
-            f"[0:v]scale={canvas_w}:{canvas_h},setsar=1[bg];"
-            f"[1:v]scale={overlay_w}:-2,colorkey=0xFFFFFF:0.22:0.10,format=rgba[presenter];"
-            f"[bg][presenter]overlay={x}:main_h-overlay_h-{bottom_margin}:format=auto[vout]"
+            "[0:v]format=rgba,"
+            f"drawbox=x=0:y={header_h}:w={canvas_w}:h=2:color=0xDADFD6@1.0:t=fill,"
+            f"drawbox=x={content_x + 12}:y={content_y + 14}:w={content_w}:h={content_h}:color=black@0.05:t=fill,"
+            f"drawbox=x={content_x}:y={content_y}:w={content_w}:h={content_h}:color=white@0.98:t=fill,"
+            f"drawbox=x={content_x}:y={content_y}:w={content_w}:h={content_h}:color=0x6E8F68@0.55:t=3,"
+            f"drawbox=x={speaker_panel_x}:y={speaker_panel_y}:w={speaker_panel_w}:h={speaker_panel_h}:color=0xEEF2EB@0.94:t=fill,"
+            f"drawbox=x={speaker_panel_x}:y={speaker_panel_y}:w={speaker_panel_w}:h={speaker_panel_h}:color=0x6E8F68@0.45:t=2[base]"
         ),
+        f"[1:v]scale=w={slide_w}:h={slide_h}:force_original_aspect_ratio=decrease,format=rgba[slide]",
+        f"[2:v]scale={presenter_w}:-2,colorkey=0xFFFFFF:0.22:0.10,format=rgba[presenter]",
+    ]
+    bg_label = "base"
+    if logo_path is not None:
+        cmd += ["-i", str(logo_path)]
+        filter_parts.append(f"[3:v]scale=-2:{logo_h},format=rgba[logo]")
+        filter_parts.append(f"[base][logo]overlay={logo_x}:{logo_y}:format=auto[with_logo]")
+        bg_label = "with_logo"
+    filter_parts.append(
+        f"[{bg_label}][slide]overlay={content_x}+(({content_w}-overlay_w)/2):{content_y}+(({content_h}-overlay_h)/2):format=auto[with_slide]"
+    )
+    filter_parts.append(
+        f"[with_slide][presenter]overlay={presenter_x}:{presenter_y_expr}:format=auto[vout]"
+    )
+    cmd += [
+        "-filter_complex", ";".join(filter_parts),
         "-map", "[vout]",
-        "-map", "1:a?",
+        "-map", "2:a?",
         "-t", str(max(0.1, dims.get("duration", 0.0))),
         "-c:v", "libx264", "-crf", "18", "-preset", "fast",
         "-c:a", "aac", "-b:a", "128k",
         "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         str(output_path),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -286,6 +364,8 @@ def compose_slide_presenter_video(
     pdf_path: str | Path,
     json_data: dict | list,
     avatar_path: str | Path,
+    json_source_path: str | Path | None = None,
+    logo_path: str | Path | None = None,
     project_tag: str | None = None,
     slide_selection: str | None = None,
     output_mode: str = DEFAULT_OUTPUT_MODE,
@@ -331,25 +411,40 @@ def compose_slide_presenter_video(
     pdf_hash = _sha1_file(pdf_path)[:12]
     avatar_hash = _sha1_file(avatar_path)[:12]
     asset_dirs = {
+        "source": project_dir / "source",
         "avatar": project_dir / "avatar",
         "audio": project_dir / "audio",
         "lipsync": project_dir / "lipsync",
         "masters": project_dir / "masters",
-        "slides": project_dir / f"slides_{pdf_hash}",
+        "slides": project_dir / "slides",
         "composite": project_dir / f"composite_{pdf_hash}",
         "exports": project_dir / "exports",
     }
     for path in asset_dirs.values():
         path.mkdir(parents=True, exist_ok=True)
 
+    project_pdf = _copy_source_file(pdf_path, asset_dirs["source"])
     project_avatar = _copy_avatar_to_project(avatar_path, asset_dirs["avatar"])
+    if json_source_path and Path(json_source_path).exists():
+        project_json = _copy_source_file(json_source_path, asset_dirs["source"])
+    else:
+        project_json = _write_json_source(normalized_json, asset_dirs["source"] / "narration.json")
+    if logo_path and Path(logo_path).exists():
+        project_logo = _copy_source_file(logo_path, asset_dirs["source"])
+    else:
+        project_logo = _existing_path(manifest.get("logo_path"))
+    logo_hash = _sha1_file(project_logo)[:12] if project_logo else None
 
     manifest.update(
         {
             "project_tag": project_slug,
             "updated_at": datetime.now().isoformat(),
-            "pdf_path": str(pdf_path),
+            "pdf_path": str(project_pdf),
             "pdf_hash": pdf_hash,
+            "json_path": str(project_json),
+            "logo_path": str(project_logo) if project_logo else None,
+            "logo_hash": logo_hash,
+            "layout_version": PRESENTER_LAYOUT_VERSION,
             "avatar_path": str(project_avatar),
             "avatar_hash": avatar_hash,
             "slide_count": slide_count,
@@ -381,8 +476,11 @@ def compose_slide_presenter_video(
     per_slide_duration: dict[int, float] = {}
     report_lines = [
         f"Project: {project_slug}",
-        f"PDF: {pdf_path.name}",
+        f"PDF: {project_pdf.name}",
+        f"JSON: {project_json.name}",
+        f"Logo: {project_logo.name if project_logo else 'none'}",
         f"Avatar: {project_avatar.name}",
+        f"Layout: {PRESENTER_LAYOUT_VERSION}",
         f"Selected slides: {selected_slides}",
     ]
 
@@ -555,7 +653,7 @@ def compose_slide_presenter_video(
     _concat_audio(master_segments, master_audio_path)
 
     yield "Rendering slides…", None
-    slide_images = _ensure_rendered_slides(pdf_path, asset_dirs["slides"], slide_count)
+    slide_images, reused_slides = _ensure_rendered_slides(project_pdf, asset_dirs["slides"], slide_count, pdf_hash)
     slide_image_map = {idx: path for idx, path in enumerate(slide_images, start=1)}
 
     composite_paths: list[Path] = []
@@ -565,7 +663,9 @@ def compose_slide_presenter_video(
             json.dumps(
                 {
                     "slide_num": slide_num,
+                    "layout_version": PRESENTER_LAYOUT_VERSION,
                     "pdf_hash": pdf_hash,
+                    "logo_hash": logo_hash,
                     "presenter_clip": str(per_slide_video[slide_num]),
                     "duration": per_slide_duration[slide_num],
                 },
@@ -578,6 +678,7 @@ def compose_slide_presenter_video(
                 slide_image=slide_image_map[slide_num],
                 presenter_video=per_slide_video[slide_num],
                 output_path=composite_path,
+                logo_image=project_logo,
             )
         composite_paths.append(composite_path)
 
@@ -612,6 +713,7 @@ def compose_slide_presenter_video(
     report_lines.extend(
         [
             f"Master audio: {master_audio_path.name}",
+            f"Slides: {'reused existing numbered renders' if reused_slides else 'rendered and saved as slide_001.png, slide_002.png, ...'}",
             f"Presenter clips: {len(per_slide_video)}",
             f"Composite slide videos: {len(composite_paths)}",
             f"Output mode: {output_mode}",

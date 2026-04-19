@@ -1272,6 +1272,7 @@ def generate_narration_video(
 def generate_slide_presenter(
     pdf_file: str | None,
     json_file: str | None,
+    logo_upload: str | None,
     avatar_upload: str | None,
     avatar_choice: str | None,
     project_tag: str,
@@ -1376,6 +1377,7 @@ def generate_slide_presenter(
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"PDF: {Path(pdf_file).name}",
         f"JSON: {Path(json_file).name}",
+        f"Logo: {Path(logo_upload).name if logo_upload and Path(logo_upload).exists() else 'stored project logo / none'}",
         f"Avatar: {Path(avatar_path).name}",
         f"Project tag: {(project_tag or Path(pdf_file).stem).strip()}",
         f"Slide selection: {slide_selection or 'all'}",
@@ -1401,6 +1403,8 @@ def generate_slide_presenter(
             pdf_path=pdf_file,
             json_data=json_data,
             avatar_path=avatar_path,
+            json_source_path=json_file,
+            logo_path=logo_upload,
             project_tag=project_tag or Path(pdf_file).stem,
             slide_selection=slide_selection or "all",
             output_mode=output_mode,
@@ -3079,9 +3083,10 @@ with gr.Blocks(title="Avatar Studio") as demo:
                 " PDF + JSON Slide Presenter with Lip-sync</div>"
             )
             gr.Markdown(
-                "Create a narrated slide video with a lip-synced presenter overlaid in the **bottom-left corner**. "
+                "Create a narrated slide video in a consulting-style 16:9 frame with a **top-left logo header**, a **bounded presentation area**, and a lip-synced presenter anchored on the **left side**. "
                 "This tab keeps per-slide narration audio, presenter lip-sync clips, master audio, and slide composites "
-                "under `data/presentations/<project-tag>` so you can rerender later against a revised PDF without throwing away the expensive avatar work."
+                "under `data/presentations/<project-tag>`. The uploaded PDF, JSON, avatar, and numbered slide renders are saved there too, "
+                "so reruns can reuse existing `slide_001.png`, `slide_002.png`, and so on when the PDF has not changed."
             )
 
             gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>upload_file</span> Inputs</div>")
@@ -3098,11 +3103,20 @@ with gr.Blocks(title="Avatar Studio") as demo:
                         file_types=[".json"],
                         file_count="single",
                     )
+                with gr.Column(scale=1):
+                    presenter_logo = gr.Image(
+                        label="Logo (optional — top-left header area)",
+                        type="filepath",
+                        sources=["upload", "clipboard"],
+                        height=140,
+                        elem_classes=["avatar-display"],
+                    )
 
             gr.HTML(
                 "<div style='font-size:0.8rem;color:var(--g-on-surface-variant);margin:-8px 0 12px'>"
                 "Slide selection examples: <code>all</code>, <code>1</code>, <code>1-3</code>, <code>1,2,5</code>. "
-                "Per-slide assets are cached by project tag, narration settings, and avatar, so regenerating a revised PDF only rerenders the slide composites when possible."
+                "If you leave Project Tag blank, the folder name defaults to the PDF filename. On rerun, Slide Presenter checks that folder first and reuses saved numbered slide PNGs when possible. "
+                "Uploaded logos are placed in the consulting-style top-left header zone and saved in the same project folder."
                 "</div>"
             )
 
@@ -3381,6 +3395,7 @@ with gr.Blocks(title="Avatar Studio") as demo:
                 inputs=[
                     presenter_pdf,
                     presenter_json,
+                    presenter_logo,
                     presenter_avatar_upload,
                     presenter_avatar_choice,
                     presenter_project_tag,
