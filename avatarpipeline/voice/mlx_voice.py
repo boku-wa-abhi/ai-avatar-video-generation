@@ -25,13 +25,14 @@ from avatarpipeline import AUDIO_DIR, TEMP_DIR, VOICES_DIR
 class MlxVoiceStudio:
     """Manage saved reference voices and MLX-based speech synthesis."""
 
-    DEFAULT_TTS_MODEL = "mlx-community/chatterbox-fp16"
+    DEFAULT_TTS_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit"
     DEFAULT_STT_MODEL = "mlx-community/whisper-large-v3-turbo-asr-fp16"
     OUTPUT_SAMPLE_RATE = 24_000
 
     MODEL_CHOICES = {
-        "Chatterbox MLX — multilingual voice cloning (~2.6 GB download)": DEFAULT_TTS_MODEL,
+        "Qwen3-TTS MLX 1.7B 8-bit — recommended for Japanese (~3.1 GB download)": DEFAULT_TTS_MODEL,
         "Qwen3-TTS MLX 0.6B 8-bit — lighter voice cloning (~2.0 GB download)": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
+        "Chatterbox MLX — multilingual voice cloning (~2.6 GB download)": "mlx-community/chatterbox-fp16",
     }
 
     LANGUAGE_CHOICES = {

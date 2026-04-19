@@ -204,7 +204,7 @@ def test_compose_narrated_video_supports_japanese_mlx_voice(tmp_path, monkeypatc
             pause_seconds=0.0,
             tts_engine="mlx",
             mlx_voice_choice="Japanese Narrator [jp-narrator]",
-            mlx_model_id="mlx-community/chatterbox-fp16",
+            mlx_model_id="mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
             mlx_language="ja",
         )
     )
@@ -212,5 +212,5 @@ def test_compose_narrated_video_supports_japanese_mlx_voice(tmp_path, monkeypatc
     assert calls
     assert calls[0]["voice_choice"] == "Japanese Narrator [jp-narrator]"
     assert calls[0]["lang_code"] == "ja"
-    assert calls[0]["model_id"] == "mlx-community/chatterbox-fp16"
+    assert calls[0]["model_id"] == "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit"
     assert Path(events[-1][1]).exists()

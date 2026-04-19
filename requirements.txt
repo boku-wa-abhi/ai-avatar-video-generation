@@ -22,3 +22,4 @@ transformers>=4.36.0
 accelerate
 gradio>=4.0.0
 pymupdf>=1.24.0
+pykakasi>=2.3.0
