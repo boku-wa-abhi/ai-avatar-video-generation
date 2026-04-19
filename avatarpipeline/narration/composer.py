@@ -112,6 +112,7 @@ def compose_narrated_video(
     pause_seconds: float = DEFAULT_PAUSE,
     tts_engine: str = "kokoro",
     mlx_voice_choice: str | None = None,
+    mlx_preset_voice: str | None = None,
     mlx_model_id: str | None = None,
     mlx_language: str | None = None,
 ) -> Generator[tuple[str, str | None], None, None]:
@@ -174,16 +175,25 @@ def compose_narrated_video(
                 if tts_engine == "mlx":
                     if studio is None:
                         raise RuntimeError("MLX voice studio is not available.")
-                    if not mlx_voice_choice:
-                        raise ValueError("Select a saved MLX voice for Slide Narrator Japanese mode.")
                     raw_wav = audio_dir / f"narr_{slide_num:03d}_raw.wav"
-                    generated = studio.synthesize_with_voice(
-                        text=narration,
-                        voice_choice=mlx_voice_choice,
-                        model_id=mlx_model_id,
-                        lang_code=mlx_language or "ja",
-                        output_path=str(raw_wav),
-                    )
+                    if mlx_preset_voice:
+                        generated = studio.synthesize_with_preset(
+                            text=narration,
+                            preset_voice=mlx_preset_voice,
+                            model_id=mlx_model_id,
+                            lang_code=mlx_language or "ja",
+                            output_path=str(raw_wav),
+                        )
+                    else:
+                        if not mlx_voice_choice:
+                            raise ValueError("Select a saved MLX voice or a Qwen preset voice for Slide Narrator Japanese mode.")
+                        generated = studio.synthesize_with_voice(
+                            text=narration,
+                            voice_choice=mlx_voice_choice,
+                            model_id=mlx_model_id,
+                            lang_code=mlx_language or "ja",
+                            output_path=str(raw_wav),
+                        )
                     _normalize_audio(generated, out_wav)
                     Path(generated).unlink(missing_ok=True)
                 else:

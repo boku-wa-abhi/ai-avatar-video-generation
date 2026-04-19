@@ -74,6 +74,9 @@ VOICE_CHOICES = {
     "Isabella — British Female":     "bf_isabella",
     "George — British Male":         "bm_george",
     "Lewis — British Male":          "bm_lewis",
+    "Kumo — Japanese Male":          "jm_kumo",
+    "Alpha — Japanese Female":       "jf_alpha",
+    "Gongitsune — Japanese Female":  "jf_gongitsune",
 }
 
 ORIENTATION_MAP = {
@@ -189,7 +192,12 @@ def generate_voice_preview(voice_display: str) -> str | None:
         vg = VoiceGenerator()
         name = voice_display.split("—")[0].strip()
         out = str(AUDIO_DIR / f"preview_{voice_id}.wav")
-        vg.generate(f"Hello, I'm {name}. Nice to meet you!", voice=voice_id, out_path=out)
+        preview_text = (
+            f"こんにちは、{name}です。よろしくお願いします。"
+            if voice_id.startswith(("jf_", "jm_"))
+            else f"Hello, I'm {name}. Nice to meet you!"
+        )
+        vg.generate(preview_text, voice=voice_id, out_path=out)
         return out
     except Exception as e:
         logger.warning(f"Voice preview failed: {e}")
@@ -723,9 +731,21 @@ def convert_mlx_voice_audio(source_audio, voice_choice, transcript_override, mod
 
 _MLX_MODEL_LABELS = MlxVoiceStudio.model_labels()
 _MLX_LANGUAGE_LABELS = MlxVoiceStudio.language_labels()
+_MLX_PRESET_VOICE_LABELS = MlxVoiceStudio.preset_voice_labels()
 _MLX_INITIAL_CHOICES = MlxVoiceStudio().list_voice_choices()
 _MLX_INITIAL_VOICE = _MLX_INITIAL_CHOICES[0] if _MLX_INITIAL_CHOICES else None
 _MLX_INITIAL_PREVIEW, _MLX_INITIAL_SUMMARY = get_mlx_voice_profile_details(_MLX_INITIAL_VOICE)
+
+
+def _label_for_model_id(model_id: str) -> str:
+    for label, value in MlxVoiceStudio.MODEL_CHOICES.items():
+        if value == model_id:
+            return label
+    return model_id
+
+
+_MLX_DEFAULT_CLONE_MODEL_LABEL = _label_for_model_id(MlxVoiceStudio.DEFAULT_TTS_MODEL)
+_MLX_DEFAULT_PRESET_MODEL_LABEL = _label_for_model_id(MlxVoiceStudio.DEFAULT_PRESET_TTS_MODEL)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -754,11 +774,19 @@ NARRATION_STEP_NAMES = [
 ]
 
 NARRATION_TTS_KOKORO = "English — Kokoro TTS"
-NARRATION_TTS_MLX_JA = "Japanese — MLX Saved Voice"
+NARRATION_TTS_MLX_JA = "Japanese — MLX Voice"
 NARRATION_TTS_CHOICES = [
     NARRATION_TTS_KOKORO,
     NARRATION_TTS_MLX_JA,
 ]
+NARRATION_JA_SOURCE_KOKORO = "Kokoro Japanese Preset"
+NARRATION_JA_SOURCE_SAVED = "Saved Voice Clone"
+NARRATION_JA_SOURCE_PRESET = "Qwen Preset Voice"
+NARRATION_JA_KOKORO_CHOICES = {
+    "Kumo — Japanese Male (default)": "jm_kumo",
+    "Alpha — Japanese Female": "jf_alpha",
+    "Gongitsune — Japanese Female": "jf_gongitsune",
+}
 
 
 def _build_narration_progress_html(
@@ -862,8 +890,8 @@ def _narration_validation_html(
 def _toggle_narration_tts_controls(mode: str | None):
     use_mlx = mode == NARRATION_TTS_MLX_JA
     helper = (
-        "Japanese narration uses the local MLX saved-voice engine. "
-        "Save a Japanese reference voice in the Voice Studio tab first, then select it here."
+        "Japanese narration uses local Qwen/MLX. "
+        "Choose either a saved cloned voice or a built-in Qwen preset voice such as Ono_Anna."
         if use_mlx
         else
         "English narration uses the built-in Kokoro TTS voices."
@@ -871,6 +899,28 @@ def _toggle_narration_tts_controls(mode: str | None):
     return (
         gr.update(visible=not use_mlx),
         gr.update(visible=use_mlx),
+        gr.update(value=helper),
+    )
+
+
+def _toggle_narration_japanese_source(source_mode: str | None):
+    use_kokoro = source_mode == NARRATION_JA_SOURCE_KOKORO
+    use_preset = source_mode == NARRATION_JA_SOURCE_PRESET
+    helper = (
+        "Using Kokoro's Japanese preset voices. Kumo is the default native Japanese male voice."
+        if use_kokoro else
+        "Using a built-in Qwen preset voice. Ono_Anna is the native Japanese option."
+        if use_preset else
+        "Using a saved cloned voice from the Voice Studio tab."
+    )
+    return (
+        gr.update(visible=not use_preset and not use_kokoro),
+        gr.update(visible=use_preset),
+        gr.update(visible=use_kokoro),
+        gr.update(
+            visible=not use_kokoro,
+            value=_MLX_DEFAULT_PRESET_MODEL_LABEL if use_preset else _MLX_DEFAULT_CLONE_MODEL_LABEL,
+        ),
         gr.update(value=helper),
     )
 
@@ -906,7 +956,10 @@ def generate_narration_video(
     json_file: str | None,
     narration_mode: str,
     voice_choice: str,
+    japanese_source_mode: str | None,
     mlx_voice_choice: str | None,
+    mlx_preset_voice: str | None,
+    kokoro_ja_voice: str | None,
     mlx_model_choice: str | None,
     pause_secs: float,
     progress=gr.Progress(track_tqdm=False),
@@ -956,7 +1009,18 @@ def generate_narration_video(
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = str(OUTPUT_DIR / f"narration_{run_id}.mp4")
 
-    if use_mlx and not mlx_voice_choice:
+    use_kokoro_ja = use_mlx and japanese_source_mode == NARRATION_JA_SOURCE_KOKORO
+    use_preset_voice = use_mlx and japanese_source_mode == NARRATION_JA_SOURCE_PRESET
+
+    if use_kokoro_ja and not kokoro_ja_voice:
+        states[0] = "error"
+        yield None, render(0, "Select a Japanese Kokoro voice first."), ""
+        return
+    if use_mlx and use_preset_voice and not mlx_preset_voice:
+        states[0] = "error"
+        yield None, render(0, "Select a Japanese Qwen preset voice first."), ""
+        return
+    if use_mlx and not use_preset_voice and not use_kokoro_ja and not mlx_voice_choice:
         states[0] = "error"
         yield None, render(0, "Select a saved Japanese MLX voice first."), ""
         return
@@ -970,8 +1034,9 @@ def generate_narration_video(
         f"PDF: {Path(pdf_file).name}",
         f"JSON: {Path(json_file).name}",
         f"Narration engine: {narration_mode}",
-        f"Voice: {mlx_voice_choice if use_mlx else voice_choice}",
-        f"Model: {mlx_model_choice if use_mlx else 'Kokoro local default'}",
+        f"Japanese voice source: {japanese_source_mode}" if use_mlx else "Japanese voice source: n/a",
+        f"Voice: {kokoro_ja_voice if use_kokoro_ja else (mlx_preset_voice if use_preset_voice else (mlx_voice_choice if use_mlx else voice_choice))}",
+        f"Model: {'Kokoro Japanese preset' if use_kokoro_ja else (mlx_model_choice if use_mlx else 'Kokoro local default')}",
         f"Default pause between slides: {pause_secs}s",
     ]
 
@@ -980,10 +1045,11 @@ def generate_narration_video(
             pdf_path=pdf_file,
             json_data=json_data,
             output_path=output_path,
-            voice=voice_id,
+            voice=NARRATION_JA_KOKORO_CHOICES.get(kokoro_ja_voice or "", "jm_kumo") if use_kokoro_ja else voice_id,
             pause_seconds=float(pause_secs),
-            tts_engine="mlx" if use_mlx else "kokoro",
-            mlx_voice_choice=mlx_voice_choice if use_mlx else None,
+            tts_engine="mlx" if (use_mlx and not use_kokoro_ja) else "kokoro",
+            mlx_voice_choice=mlx_voice_choice if (use_mlx and not use_preset_voice and not use_kokoro_ja) else None,
+            mlx_preset_voice=mlx_preset_voice if use_preset_voice else None,
             mlx_model_id=mlx_model_choice if use_mlx else None,
             mlx_language="ja" if use_mlx else None,
         )
@@ -2525,18 +2591,41 @@ with gr.Blocks(title="Avatar Studio") as demo:
                     scale=2,
                 )
             with gr.Column(visible=False) as narr_mlx_col:
+                narr_ja_source = gr.Radio(
+                    label="Japanese Voice Source",
+                    choices=[NARRATION_JA_SOURCE_KOKORO, NARRATION_JA_SOURCE_PRESET, NARRATION_JA_SOURCE_SAVED],
+                    value=NARRATION_JA_SOURCE_KOKORO,
+                )
                 with gr.Row():
-                    narr_mlx_voice = gr.Dropdown(
-                        label="Japanese Saved Voice (MLX)",
-                        choices=_MLX_INITIAL_CHOICES,
-                        value=_MLX_INITIAL_VOICE,
-                        scale=4,
-                    )
+                    with gr.Column(visible=False) as narr_mlx_saved_col:
+                        narr_mlx_voice = gr.Dropdown(
+                            label="Japanese Saved Voice (MLX)",
+                            choices=_MLX_INITIAL_CHOICES,
+                            value=_MLX_INITIAL_VOICE,
+                            scale=4,
+                        )
+                    with gr.Column(visible=True) as narr_mlx_preset_col:
+                        narr_mlx_preset = gr.Dropdown(
+                            label="Japanese Preset Voice (Qwen)",
+                            choices=_MLX_PRESET_VOICE_LABELS,
+                            value="Ono_Anna — Japanese Female (native)",
+                            scale=4,
+                        )
+                    with gr.Column(visible=True) as narr_kokoro_ja_col:
+                        narr_kokoro_ja_voice = gr.Dropdown(
+                            label="Japanese Preset Voice (Kokoro)",
+                            choices=list(NARRATION_JA_KOKORO_CHOICES.keys()),
+                            value="Kumo — Japanese Male (default)",
+                            scale=4,
+                        )
                     narr_mlx_refresh = gr.Button("Refresh Saved Voices", scale=1)
+                narr_ja_source_help = gr.Markdown(
+                    "Using Kokoro's Japanese preset voices. Kumo is the default native Japanese male voice."
+                )
                 narr_mlx_model = gr.Dropdown(
                     label="Japanese TTS Model",
                     choices=_MLX_MODEL_LABELS,
-                    value=_MLX_MODEL_LABELS[0],
+                    value=_MLX_DEFAULT_CLONE_MODEL_LABEL,
                 )
             narr_engine_help = gr.Markdown("English narration uses the built-in Kokoro TTS voices.")
 
@@ -2593,6 +2682,11 @@ with gr.Blocks(title="Avatar Studio") as demo:
                 inputs=[narr_mode],
                 outputs=[narr_kokoro_row, narr_mlx_col, narr_engine_help],
             )
+            narr_ja_source.change(
+                fn=_toggle_narration_japanese_source,
+                inputs=[narr_ja_source],
+                outputs=[narr_mlx_saved_col, narr_mlx_preset_col, narr_kokoro_ja_col, narr_mlx_model, narr_ja_source_help],
+            )
             narr_mlx_refresh.click(
                 fn=_mlx_voice_dropdown_update,
                 inputs=[narr_mlx_voice],
@@ -2600,7 +2694,7 @@ with gr.Blocks(title="Avatar Studio") as demo:
             )
             narr_generate_btn.click(
                 fn=generate_narration_video,
-                inputs=[narr_pdf, narr_json, narr_mode, narr_voice, narr_mlx_voice, narr_mlx_model, narr_pause],
+                inputs=[narr_pdf, narr_json, narr_mode, narr_voice, narr_ja_source, narr_mlx_voice, narr_mlx_preset, narr_kokoro_ja_voice, narr_mlx_model, narr_pause],
                 outputs=[narr_output, narr_log, narr_report],
             )
             narr_cancel_btn.click(fn=cancel_generation, outputs=[narr_log])

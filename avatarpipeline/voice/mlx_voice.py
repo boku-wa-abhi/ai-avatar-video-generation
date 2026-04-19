@@ -26,13 +26,28 @@ class MlxVoiceStudio:
     """Manage saved reference voices and MLX-based speech synthesis."""
 
     DEFAULT_TTS_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit"
+    DEFAULT_PRESET_TTS_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
     DEFAULT_STT_MODEL = "mlx-community/whisper-large-v3-turbo-asr-fp16"
     OUTPUT_SAMPLE_RATE = 24_000
 
     MODEL_CHOICES = {
-        "Qwen3-TTS MLX 1.7B 8-bit — recommended for Japanese (~3.1 GB download)": DEFAULT_TTS_MODEL,
+        "Qwen3-TTS MLX 1.7B Base 8-bit — recommended for cloning Japanese (~3.1 GB download)": DEFAULT_TTS_MODEL,
+        "Qwen3-TTS MLX 1.7B CustomVoice 8-bit — preset voices (~3.1 GB download)": DEFAULT_PRESET_TTS_MODEL,
         "Qwen3-TTS MLX 0.6B 8-bit — lighter voice cloning (~2.0 GB download)": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
+        "Qwen3-TTS MLX 0.6B CustomVoice 8-bit — lighter preset voices (~2.0 GB download)": "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
         "Chatterbox MLX — multilingual voice cloning (~2.6 GB download)": "mlx-community/chatterbox-fp16",
+    }
+
+    PRESET_VOICE_CHOICES = {
+        "Ono_Anna — Japanese Female (native)": "Ono_Anna",
+        "Ryan — English Male": "Ryan",
+        "Aiden — English Male": "Aiden",
+        "Vivian — Chinese Female": "Vivian",
+        "Serena — Chinese Female": "Serena",
+        "Uncle_Fu — Chinese Male": "Uncle_Fu",
+        "Dylan — Chinese Male (Beijing)": "Dylan",
+        "Eric — Chinese Male (Chengdu)": "Eric",
+        "Sohee — Korean Female": "Sohee",
     }
 
     LANGUAGE_CHOICES = {
@@ -68,6 +83,10 @@ class MlxVoiceStudio:
         return list(cls.LANGUAGE_CHOICES.keys())
 
     @classmethod
+    def preset_voice_labels(cls) -> list[str]:
+        return list(cls.PRESET_VOICE_CHOICES.keys())
+
+    @classmethod
     def resolve_model_id(cls, label_or_id: str | None) -> str:
         if not label_or_id:
             return cls.DEFAULT_TTS_MODEL
@@ -78,6 +97,12 @@ class MlxVoiceStudio:
         if not label_or_code:
             return "en"
         return cls.LANGUAGE_CHOICES.get(label_or_code, label_or_code)
+
+    @classmethod
+    def resolve_preset_voice(cls, label_or_id: str | None) -> str:
+        if not label_or_id:
+            return "Ono_Anna"
+        return cls.PRESET_VOICE_CHOICES.get(label_or_id, label_or_id)
 
     @staticmethod
     def extract_slug(choice_or_slug: str | None) -> str:
@@ -226,6 +251,49 @@ class MlxVoiceStudio:
         logger.info(f"Generated MLX speech: {output}")
         return str(output)
 
+    def synthesize_with_preset(
+        self,
+        text: str,
+        preset_voice: str,
+        model_id: str | None = None,
+        lang_code: str | None = None,
+        speed: float = 1.0,
+        pitch_shift: float = 0.0,
+        output_path: str | None = None,
+    ) -> str:
+        """Generate speech using a built-in Qwen preset speaker."""
+        script = (text or "").strip()
+        if not script:
+            raise ValueError("Enter text to synthesize.")
+
+        tts_model_id = self.resolve_model_id(model_id or self.DEFAULT_PRESET_TTS_MODEL)
+        lang = self.resolve_language_code(lang_code)
+        voice_id = self.resolve_preset_voice(preset_voice)
+        output = Path(output_path) if output_path else AUDIO_DIR / self._timestamped_name("mlx_preset_tts")
+        output = output.with_suffix(".wav").resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+
+        raw_output = output.with_name(f"{output.stem}_raw.wav")
+        self._generate_audio(
+            text=script,
+            model_id=tts_model_id,
+            voice=voice_id,
+            ref_audio=None,
+            ref_text=None,
+            lang_code=lang,
+            speed=float(speed),
+            output_path=raw_output,
+        )
+
+        if abs(float(pitch_shift)) > 1e-6:
+            self.apply_pitch_shift(raw_output, output, float(pitch_shift))
+            raw_output.unlink(missing_ok=True)
+        else:
+            shutil.move(str(raw_output), str(output))
+
+        logger.info(f"Generated MLX preset speech: {output}")
+        return str(output)
+
     def convert_voice(
         self,
         source_audio: str,
@@ -343,7 +411,8 @@ class MlxVoiceStudio:
         self,
         text: str,
         model_id: str,
-        ref_audio: str,
+        voice: str | None,
+        ref_audio: str | None,
         ref_text: str | None,
         lang_code: str,
         speed: float,
@@ -354,6 +423,7 @@ class MlxVoiceStudio:
         generate_audio(
             text=text,
             model=model,
+            voice=voice or "af_heart",
             ref_audio=ref_audio,
             ref_text=ref_text,
             lang_code=lang_code,

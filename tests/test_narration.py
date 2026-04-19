@@ -214,3 +214,115 @@ def test_compose_narrated_video_supports_japanese_mlx_voice(tmp_path, monkeypatc
     assert calls[0]["lang_code"] == "ja"
     assert calls[0]["model_id"] == "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit"
     assert Path(events[-1][1]).exists()
+
+
+def test_compose_narrated_video_supports_japanese_qwen_preset_voice(tmp_path, monkeypatch):
+    import avatarpipeline.narration.composer as composer
+    import avatarpipeline.voice.mlx_voice as mlx_voice_mod
+
+    pdf_path = tmp_path / "deck.pdf"
+    _make_pdf(pdf_path, 1)
+
+    slide_image = tmp_path / "slide_001.png"
+    Image.new("RGB", (1920, 1080), (25, 55, 95)).save(slide_image)
+
+    calls: list[dict] = []
+
+    def fake_render_slides(_pdf_path, _output_dir):
+        return [slide_image]
+
+    class FakeStudio:
+        def synthesize_with_preset(
+            self,
+            text,
+            preset_voice,
+            model_id=None,
+            lang_code=None,
+            speed=1.0,
+            pitch_shift=0.0,
+            output_path=None,
+        ):
+            calls.append(
+                {
+                    "text": text,
+                    "preset_voice": preset_voice,
+                    "model_id": model_id,
+                    "lang_code": lang_code,
+                }
+            )
+            _write_silence(Path(output_path), 0.7, sample_rate=24000)
+            return str(output_path)
+
+    monkeypatch.setattr(composer, "render_slides", fake_render_slides)
+    monkeypatch.setattr(mlx_voice_mod, "MlxVoiceStudio", FakeStudio)
+
+    json_data = {
+        "slides": [
+            {"slide_number": 1, "narration": "量子計算の概要をご説明します。", "duration_seconds": 1.0},
+        ],
+    }
+
+    events = list(
+        composer.compose_narrated_video(
+            pdf_path=pdf_path,
+            json_data=json_data,
+            output_path=tmp_path / "narrated_ja_preset.mp4",
+            pause_seconds=0.0,
+            tts_engine="mlx",
+            mlx_preset_voice="Ono_Anna",
+            mlx_model_id="mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
+            mlx_language="ja",
+        )
+    )
+
+    assert calls
+    assert calls[0]["preset_voice"] == "Ono_Anna"
+    assert calls[0]["lang_code"] == "ja"
+    assert calls[0]["model_id"] == "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
+    assert Path(events[-1][1]).exists()
+
+
+def test_compose_narrated_video_supports_japanese_kokoro_voice(tmp_path, monkeypatch):
+    import avatarpipeline.narration.composer as composer
+    import avatarpipeline.voice.kokoro as kokoro_mod
+
+    pdf_path = tmp_path / "deck.pdf"
+    _make_pdf(pdf_path, 1)
+
+    slide_image = tmp_path / "slide_001.png"
+    Image.new("RGB", (1920, 1080), (40, 80, 120)).save(slide_image)
+
+    calls: list[dict] = []
+
+    def fake_render_slides(_pdf_path, _output_dir):
+        return [slide_image]
+
+    class FakeVoiceGenerator:
+        def generate(self, text, voice=None, out_path=None):
+            calls.append({"text": text, "voice": voice})
+            _write_silence(Path(out_path), 0.8)
+            return str(out_path)
+
+    monkeypatch.setattr(composer, "render_slides", fake_render_slides)
+    monkeypatch.setattr(kokoro_mod, "VoiceGenerator", FakeVoiceGenerator)
+
+    json_data = {
+        "slides": [
+            {"slide_number": 1, "narration": "これは日本語の男性ナレーションです。", "duration_seconds": 1.0},
+        ],
+    }
+
+    events = list(
+        composer.compose_narrated_video(
+            pdf_path=pdf_path,
+            json_data=json_data,
+            output_path=tmp_path / "narrated_ja_kokoro.mp4",
+            voice="jm_kumo",
+            pause_seconds=0.0,
+            tts_engine="kokoro",
+        )
+    )
+
+    assert calls
+    assert calls[0]["voice"] == "jm_kumo"
+    assert Path(events[-1][1]).exists()

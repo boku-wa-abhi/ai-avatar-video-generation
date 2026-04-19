@@ -40,6 +40,10 @@ class VoiceGenerator:
         # British English — Male
         "bm_george":   "bm_george",
         "bm_lewis":    "bm_lewis",
+        # Japanese
+        "jf_alpha":    "jf_alpha",
+        "jf_gongitsune": "jf_gongitsune",
+        "jm_kumo":     "jm_kumo",
     }
 
     SAMPLE_RATE = 24_000
@@ -59,16 +63,30 @@ class VoiceGenerator:
             self.speed = float(tts.get("speed", self.speed))
             self.lang_code = tts.get("lang_code", self.lang_code)
 
-        self._pipeline = None  # lazy-loaded on first use
+        self._pipelines: dict[str, object] = {}
         logger.info(f"VoiceGenerator ready (engine=kokoro, voice={self.default_voice})")
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _get_pipeline(self):
-        """Lazy-load the Kokoro pipeline (downloads ~330 MB model on first call)."""
-        if self._pipeline is None:
+    @staticmethod
+    def _lang_code_for_voice(voice_id: str, fallback: str = "a") -> str:
+        """Map Kokoro voice ids to pipeline language codes."""
+        prefix = (voice_id or "").split("_", 1)[0].lower()
+        if prefix.startswith(("af", "am")):
+            return "a"
+        if prefix.startswith(("bf", "bm")):
+            return "b"
+        if prefix.startswith("j"):
+            return "j"
+        if prefix.startswith("z"):
+            return "z"
+        return fallback
+
+    def _get_pipeline(self, lang_code: str):
+        """Lazy-load a Kokoro pipeline for the requested language code."""
+        if lang_code not in self._pipelines:
             try:
                 from kokoro import KPipeline
             except ImportError:
@@ -77,10 +95,10 @@ class VoiceGenerator:
                     "  brew install espeak-ng\n"
                     "  uv pip install kokoro"
                 )
-            logger.info("Loading Kokoro pipeline...")
-            self._pipeline = KPipeline(lang_code=self.lang_code)
-            logger.info("Kokoro pipeline ready")
-        return self._pipeline
+            logger.info(f"Loading Kokoro pipeline (lang_code={lang_code})...")
+            self._pipelines[lang_code] = KPipeline(lang_code=lang_code)
+            logger.info(f"Kokoro pipeline ready (lang_code={lang_code})")
+        return self._pipelines[lang_code]
 
     # ------------------------------------------------------------------
     # Public API
@@ -105,6 +123,7 @@ class VoiceGenerator:
         """
         voice = voice or self.default_voice
         voice_id = self.VOICES.get(voice, voice)
+        lang_code = self._lang_code_for_voice(voice_id, fallback=self.lang_code)
 
         dest = Path(out_path) if out_path else AUDIO_DIR / "output.wav"
         if not dest.is_absolute():
@@ -112,9 +131,11 @@ class VoiceGenerator:
             dest = ROOT / dest
         dest.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Generating TTS ({len(text)} chars, voice={voice_id}, speed={self.speed})...")
+        logger.info(
+            f"Generating TTS ({len(text)} chars, voice={voice_id}, lang_code={lang_code}, speed={self.speed})..."
+        )
 
-        pipe = self._get_pipeline()
+        pipe = self._get_pipeline(lang_code)
         chunks = []
         for _, _, audio in pipe(text, voice=voice_id, speed=self.speed):
             if audio is not None and audio.ndim > 0 and len(audio) > 0:
