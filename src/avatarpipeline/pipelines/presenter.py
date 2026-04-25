@@ -202,6 +202,7 @@ def _compose_presenter_overlay(
     bottom_margin: int = 36,
     left_margin: int = 40,
     width_ratio: float = 0.28,
+    bg_color: str = "white",
 ) -> str:
     slide_image = Path(slide_image).resolve()
     presenter_video = Path(presenter_video).resolve()
@@ -228,7 +229,7 @@ def _compose_presenter_overlay(
 
     cmd = [
         "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"color=c=white:s={canvas_w}x{canvas_h}:r={fps}",
+        "-f", "lavfi", "-i", f"color=c={bg_color}:s={canvas_w}x{canvas_h}:r={fps}",
         "-loop", "1", "-i", str(slide_image),
         "-i", str(presenter_video),
     ]
@@ -293,6 +294,7 @@ def compose_slide_presenter_video(
     st_pose_style: int = 0,
     st_still: bool = True,
     st_preprocess: str = "full",
+    bg_color: str = "white",
 ) -> Generator[tuple[str, dict | None], None, None]:
     """Build persistent per-slide presenter assets and export selected outputs."""
     pdf_path = Path(pdf_path).resolve()
@@ -588,6 +590,7 @@ def compose_slide_presenter_video(
                 presenter_video=per_slide_video[slide_num],
                 output_path=composite_path,
                 logo_image=project_logo,
+                bg_color=bg_color,
             )
         composite_paths.append(composite_path)
 

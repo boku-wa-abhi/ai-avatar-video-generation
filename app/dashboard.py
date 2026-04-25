@@ -1356,6 +1356,7 @@ def generate_slide_presenter(
     st_pose_style: int = 0,
     st_still: bool = True,
     st_preprocess: str = "full",
+    bg_color: str = "white",
     progress=gr.Progress(track_tqdm=False),
 ):
     _cancel_event.clear()
@@ -1485,6 +1486,7 @@ def generate_slide_presenter(
             st_pose_style=int(st_pose_style),
             st_still=bool(st_still),
             st_preprocess=st_preprocess,
+            bg_color=(bg_color or "white").strip(),
         )
 
         for msg, payload in gen:
@@ -2338,6 +2340,53 @@ footer { display: none !important; }
     margin-bottom: 6px;
 }
 .narr-check-icon { font-size: 17px; flex-shrink: 0; margin-top: 1px; }
+
+/* ── Toggle Radio (segmented on/off button) ──────────────────────────────── */
+.toggle-radio > .label-wrap {
+    font-family: 'Google Sans', sans-serif !important;
+    font-size: 0.74rem !important; font-weight: 700 !important;
+    text-transform: uppercase !important; letter-spacing: 0.07em !important;
+    color: var(--g-on-surface-variant) !important;
+    margin-bottom: 6px !important;
+}
+.toggle-radio .wrap {
+    display: flex !important;
+    gap: 0 !important;
+    padding: 0 !important;
+    border: 1.5px solid var(--g-outline) !important;
+    border-radius: 999px !important;
+    overflow: hidden !important;
+    background: var(--g-surface-dim) !important;
+    width: fit-content !important;
+}
+.toggle-radio .wrap > label {
+    padding: 8px 22px !important;
+    border-radius: 0 !important;
+    border: none !important;
+    border-right: 1px solid var(--g-outline) !important;
+    background: transparent !important;
+    color: var(--g-on-surface-variant) !important;
+    font-size: 0.84rem !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: all 0.15s ease !important;
+    user-select: none !important;
+    box-shadow: none !important;
+    display: inline-flex !important;
+    align-items: center !important;
+}
+.toggle-radio .wrap > label:last-child { border-right: none !important; }
+.toggle-radio .wrap > label:hover {
+    background: var(--g-surface-container) !important;
+    color: var(--g-on-surface) !important;
+}
+.toggle-radio .wrap > label:has(input:checked) {
+    background: linear-gradient(135deg, #0f6fff 0%, #2b86ff 100%) !important;
+    color: white !important;
+    font-weight: 600 !important;
+    border-right-color: transparent !important;
+}
+.toggle-radio .wrap > label input[type="radio"] { display: none !important; }
 """
 
 
@@ -2569,9 +2618,19 @@ with gr.Blocks(title="Avatar Studio") as demo:
                     a2l_audio = gr.Audio(label="Upload Audio (MP3 / WAV / M4A)", type="filepath", sources=["upload"])
                     gr.HTML("<div class='section-title'><span class='material-symbols-outlined'>tune</span> Video Settings</div>")
                     with gr.Row():
-                        a2l_orientation = gr.Radio(label="Orientation", choices=list(ORIENTATION_MAP.keys()), value="Portrait 9:16", scale=2)
                         a2l_music_slider = gr.Slider(label="Music Volume", minimum=0.0, maximum=1.0, step=0.05, value=0.15, scale=1)
                         a2l_background = gr.File(label="Background / Music", file_types=["image", ".mp4", ".mp3", ".wav", ".m4a"], scale=1)
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            a2l_enhance_display = gr.Radio(
+                                label="Face Enhancement",
+                                choices=["Off", "On"],
+                                value="On",
+                                elem_classes=["toggle-radio"],
+                            )
+                        a2l_enhance = gr.State(True)
+                        with gr.Column(scale=1):
+                            a2l_preview_mode = gr.Checkbox(label="Preview mode (faster)", value=False)
                     with gr.Accordion("Advanced Options", open=False):
                         a2l_engine = gr.Radio(label="Lip-sync Engine", choices=["MuseTalk 1.5", "SadTalker 256px", "SadTalker HD"], value="MuseTalk 1.5")
                         with gr.Column(visible=True) as a2l_mt_params:
@@ -2585,14 +2644,23 @@ with gr.Blocks(title="Avatar Studio") as demo:
                             with gr.Row():
                                 a2l_st_still = gr.Checkbox(label="Still mode", value=True)
                                 a2l_st_preprocess = gr.Dropdown(label="Preprocess", choices=["crop", "extcrop", "resize", "full", "extfull"], value="full")
-                        with gr.Row():
-                            a2l_enhance = gr.Checkbox(label="Face enhancement", value=True)
-                        with gr.Row():
-                            a2l_captions = gr.Checkbox(label="Auto captions", value=True)
-                            a2l_preview_mode = gr.Checkbox(label="Preview mode (faster)", value=False)
-                        with gr.Row():
-                            a2l_caption_fontsize = gr.Slider(label="Caption Size", minimum=12, maximum=32, step=1, value=20)
-                            a2l_caption_position = gr.Dropdown(label="Caption Position", choices=["Bottom", "Center", "Top"], value="Bottom")
+                        gr.HTML("<div class='section-title' style='margin-top:12px'><span class='material-symbols-outlined'>closed_caption</span> Captions</div>")
+                        a2l_captions_display = gr.Radio(
+                            label="Add Captions",
+                            choices=["No", "Yes"],
+                            value="No",
+                            elem_classes=["toggle-radio"],
+                        )
+                        a2l_captions = gr.State(False)
+                        with gr.Column(visible=False) as a2l_caption_opts:
+                            with gr.Row():
+                                a2l_caption_position = gr.Radio(
+                                    label="Caption Position",
+                                    choices=["Bottom", "Top", "Center"],
+                                    value="Bottom",
+                                    elem_classes=["toggle-radio"],
+                                )
+                                a2l_caption_fontsize = gr.Slider(label="Caption Size", minimum=12, maximum=32, step=1, value=20)
 
             gr.HTML('<div class="divider"></div>')
             with gr.Row():
@@ -2612,12 +2680,18 @@ with gr.Blocks(title="Avatar Studio") as demo:
             a2l_avatar_upload.change(fn=save_uploaded_avatar, inputs=[a2l_avatar_upload], outputs=[a2l_avatar_preview, a2l_avatar_status, a2l_avatar_gallery])
             a2l_avatar_gallery.select(fn=select_avatar_from_gallery, outputs=[a2l_avatar_preview, a2l_avatar_status])
             a2l_engine.change(fn=_toggle_lipsync_params, inputs=[a2l_engine], outputs=[a2l_mt_params, a2l_st_params])
+            a2l_enhance_display.change(fn=lambda x: x == "On", inputs=[a2l_enhance_display], outputs=[a2l_enhance])
+            a2l_captions_display.change(
+                fn=lambda x: (gr.update(visible=x == "Yes"), x == "Yes"),
+                inputs=[a2l_captions_display],
+                outputs=[a2l_caption_opts, a2l_captions],
+            )
             a2l_generate_btn.click(
                 fn=generate_video,
                 inputs=[
                     gr.Textbox(value="", visible=False), a2l_audio,
                     gr.Dropdown(value="Heart — Warm Female (default)", choices=list(VOICE_CHOICES.keys()), visible=False),
-                    a2l_orientation, a2l_music_slider, a2l_background,
+                    gr.Textbox(value="Portrait 9:16", visible=False), a2l_music_slider, a2l_background,
                     a2l_engine, a2l_enhance, a2l_captions, a2l_preview_mode,
                     a2l_caption_fontsize, a2l_caption_position,
                     a2l_mt_batch, a2l_mt_bbox,
@@ -3249,6 +3323,14 @@ with gr.Blocks(title="Avatar Studio") as demo:
                     value=PRESENTER_OUTPUT_MODE_ONE_BY_ONE,
                     scale=2,
                 )
+            with gr.Row():
+                presenter_bg_color = gr.Textbox(
+                    label="Background Color",
+                    value="white",
+                    placeholder="e.g. white, #f5f5f5, #1a1a2e, black",
+                    scale=2,
+                    info="Any CSS/FFmpeg color: name, hex (#rrggbb), or rgb(r,g,b)",
+                )
 
             gr.HTML('<div class="divider"></div>')
 
@@ -3479,6 +3561,7 @@ with gr.Blocks(title="Avatar Studio") as demo:
                     presenter_st_pose,
                     presenter_st_still,
                     presenter_st_preprocess,
+                    presenter_bg_color,
                 ],
                 outputs=[presenter_output, presenter_log, presenter_report, presenter_files],
             )
