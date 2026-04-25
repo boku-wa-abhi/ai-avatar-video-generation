@@ -32,7 +32,7 @@ safe_rm ~/ComfyUI/custom_nodes/ComfyUI-LatentSyncWrapper/
 echo ""
 
 echo "Step 3 — Delete LatentSync Python files from project..."
-safe_rm "$PROJECT_DIR/avatarpipeline/lipsync/latentsync.py"
+safe_rm "$PROJECT_DIR/src/avatarpipeline/engines/lipsync/latentsync.py"
 safe_rm "$PROJECT_DIR/data/temp/_latentsync_runner.py"
 echo ""
 

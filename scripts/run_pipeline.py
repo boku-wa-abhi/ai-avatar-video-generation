@@ -15,9 +15,9 @@ import os
 import sys
 from pathlib import Path
 
-# Ensure project root is on PYTHONPATH
+# Ensure the src-layout package is on PYTHONPATH when running from a checkout.
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
@@ -70,7 +70,7 @@ def main() -> None:
     args = _parse_args()
 
     if args.list_voices:
-        from avatarpipeline.voice.kokoro import VoiceGenerator
+        from avatarpipeline.engines.tts.kokoro import VoiceGenerator
         print("\nAvailable voices:\n")
         for v in VoiceGenerator().list_voices():
             print(f"  {v}")
@@ -82,7 +82,7 @@ def main() -> None:
         sys.exit(1)
 
     from loguru import logger
-    from avatarpipeline.pipeline import run_pipeline
+    from avatarpipeline.pipelines.avatar import run_pipeline
 
     try:
         run_pipeline(

@@ -26,6 +26,13 @@ lipsync:
   default_engine: "musetalk"        # musetalk | sadtalker | sadtalker_hd
   expression_scale: 1.0              # SadTalker expression intensity (0.0–3.0)
 
+# MuseTalk runtime settings
+musetalk:
+  fps: 25
+  use_float16: true
+  default_bbox_shift: 0
+  default_batch_size: 8
+
 # Local TTS settings (Kokoro — hexgrad/Kokoro-82M)
 tts:
   engine: "kokoro"

@@ -51,20 +51,13 @@ Deliverable MP4
 ```
 ai-avatar-video-generation/
 │
-├── avatarpipeline/           # Core library package
-│   ├── __init__.py           # ROOT, data-dir constants, version
-│   ├── pipeline.py           # 7-step orchestrator (run_pipeline)
-│   ├── voice/
-│   │   └── kokoro.py         # VoiceGenerator — Kokoro TTS
-│   ├── lipsync/
-│   │   ├── musetalk.py       # MuseTalkInference  — lip-sync (default)
-│   │   └── sadtalker.py      # SadTalkerInference — lip-sync (alt)
-│   └── postprocess/
-│       ├── enhancer.py       # FaceEnhancer — CodeFormer / GFPGAN
-│       ├── captions.py       # CaptionGenerator — faster-whisper
-│       └── assembler.py      # VideoAssembler — FFmpeg composite + encode
+├── src/avatarpipeline/       # Core library package
+│   ├── core/                 # config, protocols, shared media helpers
+│   ├── engines/              # TTS and lip-sync backends
+│   ├── pipelines/            # avatar, narration, presenter, podcast pipelines
+│   └── postprocess/          # enhance, captions, assemble/finalize
 │
-├── ui/
+├── app/
 │   └── dashboard.py          # Gradio web dashboard
 │
 ├── scripts/
@@ -73,8 +66,8 @@ ai-avatar-video-generation/
 │   └── smoke_test.sh         # End-to-end integration test
 │
 ├── install/
-│   ├── setup.sh              # Phase 1: system deps, Python venv, MuseTalk
-│   └── install_sadtalker.sh  # Phase 2: SadTalker + MPS patches
+│   ├── setup.sh              # system deps, Python venv, MuseTalk
+│   └── install_latentsync.sh # optional legacy LatentSync installer
 │
 ├── configs/
 │   └── settings.yaml         # All pipeline settings
@@ -84,7 +77,8 @@ ai-avatar-video-generation/
 │   └── favicon.png
 │
 ├── tests/
-│   └── test_pipeline.py      # 17 pytest unit + integration tests
+│   ├── unit/
+│   └── integration/
 │
 ├── data/                     # Runtime data — git-ignored
 │   ├── avatars/              # avatar.png lives here
@@ -93,7 +87,7 @@ ai-avatar-video-generation/
 │   ├── captions/             # SRT subtitle files
 │   └── temp/                 # Intermediate files
 │
-├── requirements.txt
+├── pyproject.toml
 ├── .env                      # Optional: HF_TOKEN etc. (git-ignored)
 └── README.md
 ```
@@ -261,18 +255,18 @@ tts:
 
 ## Architecture Notes
 
-`avatarpipeline/` is a proper Python package. Import any class directly:
+`src/avatarpipeline/` is a proper Python package. Import any class directly:
 
 ```python
-from avatarpipeline.voice.kokoro import VoiceGenerator
-from avatarpipeline.lipsync.latentsync import LatentSyncInference
+from avatarpipeline.engines.tts.kokoro import VoiceGenerator
+from avatarpipeline.engines.lipsync.musetalk import MuseTalkInference
 from avatarpipeline.postprocess.assembler import VideoAssembler
-from avatarpipeline.pipeline import run_pipeline
+from avatarpipeline.pipelines.avatar import run_pipeline
 ```
 
 `avatarpipeline/__init__.py` exports `ROOT`, `AVATARS_DIR`, `AUDIO_DIR`, `OUTPUT_DIR`, `CAPTIONS_DIR`, `TEMP_DIR` as `Path` constants so every module resolves paths consistently relative to the project root.
 
-`ui/dashboard.py` is a consumer of the library, not part of it. `scripts/` contains thin entry-point wrappers that add the project root to `sys.path` and delegate to the library.
+`app/dashboard.py` is a consumer of the library, not part of it. `scripts/` contains thin entry-point wrappers that add `src/` to `sys.path` and delegate to the library.
 
 ---
 

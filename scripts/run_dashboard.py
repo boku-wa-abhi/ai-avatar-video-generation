@@ -13,9 +13,10 @@ import socket
 import sys
 from pathlib import Path
 
-# Ensure project root is on PYTHONPATH
+# Ensure the src-layout package is on PYTHONPATH when running from a checkout.
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
@@ -45,7 +46,7 @@ def main() -> None:
     port = args.port if args.port is not None else _find_free_port(7860, 7870)
 
     import gradio as gr
-    from ui.dashboard import CSS, demo, THEME
+    from app.dashboard import CSS, demo, THEME
     from avatarpipeline import ASSETS_DIR
 
     print(f"\n  Avatar Studio — starting on http://{args.host}:{port}\n")

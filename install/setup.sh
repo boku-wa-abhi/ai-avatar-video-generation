@@ -18,15 +18,15 @@ fail() { echo -e "${RED}[FAIL]${NC} $*"; }
 
 # Load .env if present
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/.env" ]; then
+PIPELINE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [ -f "$PIPELINE_DIR/.env" ]; then
     set -o allexport
     # shellcheck source=/dev/null
-    source "$SCRIPT_DIR/.env"
+    source "$PIPELINE_DIR/.env"
     set +o allexport
     log "Loaded .env"
 fi
 
-PIPELINE_DIR="$SCRIPT_DIR"
 MUSETALK_DIR="$HOME/MuseTalk"
 VENV_DIR="$MUSETALK_DIR/musetalk-env"
 PIPELINE_VENV="$PIPELINE_DIR/.venv"
@@ -166,9 +166,9 @@ else
     warn "  No requirements.txt in MuseTalk repo — skipping"
 fi
 
-# Pipeline requirements
-log "  Installing avatar-pipeline requirements..."
-uv pip install -r "$PIPELINE_DIR/requirements.txt"
+# Pipeline package
+log "  Installing avatar-pipeline package..."
+uv pip install -e "$PIPELINE_DIR[japanese]"
 
 log "Step D — Packages installed ✓"
 
@@ -193,8 +193,8 @@ else
     log "  MPS env vars already set ✓"
 fi
 
-log "  Installing pipeline requirements into pipeline venv..."
-uv pip install --python "$PIPELINE_VENV/bin/python" -r "$PIPELINE_DIR/requirements.txt"
+log "  Installing pipeline package into pipeline venv..."
+uv pip install --python "$PIPELINE_VENV/bin/python" -e "$PIPELINE_DIR[japanese]"
 
 log "Step D2 — Pipeline venv ready (Python: $($PIPELINE_VENV/bin/python --version)) ✓"
 

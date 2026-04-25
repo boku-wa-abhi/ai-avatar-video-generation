@@ -114,7 +114,7 @@
 
 | Property | Value |
 |----------|-------|
-| **Code** | `avatarpipeline/voice/kokoro.py` → `VoiceGenerator` |
+| **Code** | `src/avatarpipeline/engines/tts/kokoro.py` → `VoiceGenerator` |
 | **Model** | Kokoro-82M |
 | **Source** | PyPI: `kokoro>=0.9.4` / HuggingFace: [`hexgrad/Kokoro-82M`](https://huggingface.co/hexgrad/Kokoro-82M) |
 | **Size** | ~330 MB |
@@ -173,7 +173,7 @@ This is the core stage. Two models are available:
 
 | Property | Value |
 |----------|-------|
-| **Code** | `avatarpipeline/lipsync/latentsync.py` → `LatentSyncInference` |
+| **Code** | `src/avatarpipeline/engines/lipsync/latentsync.py` → `LatentSyncInference` |
 | **Model** | LatentSync 1.6 UNet (diffusion-based) |
 | **Source** | HuggingFace: [`ByteDance/LatentSync-1.6`](https://huggingface.co/ByteDance/LatentSync-1.6) (gated — requires HF_TOKEN) |
 | **Size** | ~7 GB total (UNet + VAE + Whisper + SyncNet) |
@@ -213,7 +213,7 @@ latentsync:
 
 | Property | Value |
 |----------|-------|
-| **Code** | `avatarpipeline/lipsync/musetalk.py` → `MuseTalkInference` |
+| **Code** | `src/avatarpipeline/engines/lipsync/musetalk.py` → `MuseTalkInference` |
 | **Model** | MuseTalk v1.5 |
 | **Source** | GitHub: [`TMElyralab/MuseTalk`](https://github.com/TMElyralab/MuseTalk) |
 | **Size** | ~3 GB |
@@ -247,7 +247,7 @@ latentsync:
 
 | Property | Value |
 |----------|-------|
-| **Code** | `avatarpipeline/postprocess/enhancer.py` → `FaceEnhancer` |
+| **Code** | `src/avatarpipeline/postprocess/enhancer.py` → `FaceEnhancer` |
 | **Optional** | Skippable with `--no-enhance` |
 | **Input** | Raw lip-synced MP4 |
 | **Output** | Enhanced MP4 with restored facial details |
@@ -275,7 +275,7 @@ latentsync:
 
 | Property | Value |
 |----------|-------|
-| **Code** | `avatarpipeline/postprocess/assembler.py` → `VideoAssembler` |
+| **Code** | `src/avatarpipeline/postprocess/assembler.py` → `VideoAssembler` |
 | **Tool** | FFmpeg (no ML model) |
 
 **Supported orientations:**
@@ -303,7 +303,7 @@ latentsync:
 
 | Property | Value |
 |----------|-------|
-| **Code** | `avatarpipeline/postprocess/captions.py` → `CaptionGenerator` |
+| **Code** | `src/avatarpipeline/postprocess/captions.py` → `CaptionGenerator` |
 | **Model** | faster-whisper large-v3 (CTranslate2 port of Whisper) |
 | **Source** | PyPI: `faster-whisper>=1.0.0` / HuggingFace: [`Systran/faster-whisper-large-v3`](https://huggingface.co/Systran/faster-whisper-large-v3) |
 | **Size** | ~3 GB |
@@ -447,7 +447,7 @@ For every model in the pipeline, here are the free, open-source alternatives you
 | **OmniVoice** | — | — | Apache 2.0 | [k2-fsa/OmniVoice](https://huggingface.co/k2-fsa/OmniVoice) | Multi-task voice model | Recently released |
 | **Fish Speech** | 1B | 4 GB | Apache 2.0 | [fishaudio/s2-pro](https://huggingface.co/fishaudio/s2-pro) | Pro-quality, multilingual | Heavy |
 
-**How to swap:** Replace `VoiceGenerator` in `avatarpipeline/voice/kokoro.py` with a new class that exposes the same `generate(text, voice, out_path) → str` interface. The output must be a WAV file (any sample rate — Stage 2 handles resampling).
+**How to swap:** Replace `VoiceGenerator` in `src/avatarpipeline/engines/tts/kokoro.py` with a new class that exposes the same `generate(text, voice, out_path) → str` interface. The output must be a WAV file (any sample rate — Stage 2 handles resampling).
 
 ---
 
@@ -465,7 +465,7 @@ For every model in the pipeline, here are the free, open-source alternatives you
 | **Hallo** | Diffusion | 8 GB | MIT | [fudan-generative-vision/hallo](https://github.com/fudan-generative-vision/hallo) | High-quality talking head | Heavy, new |
 | **EchoMimic** | Diffusion | 6 GB | Apache 2.0 | [BadToBest/EchoMimic](https://github.com/BadToBest/EchoMimic) | Expressive, pose-driven | New, less tested |
 
-**How to swap:** Create a new class in `avatarpipeline/lipsync/` that implements `run(avatar_png, audio_wav, output_path) → str`. The output must be an MP4 with audio. Update `avatarpipeline/pipeline.py` to import your new class.
+**How to swap:** Create a new class in `src/avatarpipeline/engines/lipsync/` that implements `run(avatar_png, audio_wav, output_path) → str`. The output must be an MP4 with audio. Update `src/avatarpipeline/pipelines/avatar.py` to import your new class.
 
 ---
 
@@ -481,7 +481,7 @@ For every model in the pipeline, here are the free, open-source alternatives you
 | **DFDNet** | 350 MB | MIT | [csxmli2016/DFDNet](https://github.com/csxmli2016/DFDNet) | Dictionary-based restoration | Older |
 | **None (skip)** | 0 | — | `--no-enhance` flag | Fastest, no artifacts | No enhancement |
 
-**How to swap:** Modify `FaceEnhancer` in `avatarpipeline/postprocess/enhancer.py`. The class needs `enhance(video_path, output_path) → str` which processes frames and returns an enhanced MP4.
+**How to swap:** Modify `FaceEnhancer` in `src/avatarpipeline/postprocess/enhancer.py`. The class needs `enhance(video_path, output_path) → str` which processes frames and returns an enhanced MP4.
 
 ---
 
@@ -498,7 +498,7 @@ For every model in the pipeline, here are the free, open-source alternatives you
 | **Distil-Whisper** | 756M | 1.5 GB | MIT | [distil-whisper/distil-large-v3](https://huggingface.co/distil-whisper/distil-large-v3) | 6× faster than Whisper large | Slightly less accurate |
 | **Moonshine** | — | 60 MB | MIT | [usefulsensors/moonshine](https://huggingface.co/usefulsensors/moonshine) | Ultra small, edge device | Lower accuracy |
 
-**How to swap:** Change `CaptionGenerator.__init__()` in `avatarpipeline/postprocess/captions.py`. The `model_size` parameter already supports: `tiny`, `base`, `small`, `medium`, `large-v3`. For non-Whisper models, replace the `faster_whisper.WhisperModel` call with your preferred ASR library. Output must be SRT format.
+**How to swap:** Change `CaptionGenerator.__init__()` in `src/avatarpipeline/postprocess/captions.py`. The `model_size` parameter already supports: `tiny`, `base`, `small`, `medium`, `large-v3`. For non-Whisper models, replace the `faster_whisper.WhisperModel` call with your preferred ASR library. Output must be SRT format.
 
 **Quick size/accuracy tradeoff:**
 ```python
@@ -521,13 +521,13 @@ Run these checks to verify every component is working:
 ```bash
 # 1. Verify all Python imports work
 python -c "
-from avatarpipeline.voice.kokoro import VoiceGenerator
-from avatarpipeline.lipsync.latentsync import LatentSyncInference
-from avatarpipeline.lipsync.musetalk import MuseTalkInference
+from avatarpipeline.engines.tts.kokoro import VoiceGenerator
+from avatarpipeline.engines.lipsync.sadtalker import SadTalkerInference
+from avatarpipeline.engines.lipsync.musetalk import MuseTalkInference
 from avatarpipeline.postprocess.enhancer import FaceEnhancer
 from avatarpipeline.postprocess.captions import CaptionGenerator
 from avatarpipeline.postprocess.assembler import VideoAssembler
-from avatarpipeline.pipeline import run_pipeline
+from avatarpipeline.pipelines.avatar import run_pipeline
 print('All imports OK')
 "
 
@@ -609,11 +609,11 @@ Use this to decide which models/settings to use for different scenarios:
 
 | If you want to... | Replace this class | With interface | File to modify |
 |---|---|---|---|
-| Use a different TTS | `VoiceGenerator` | `generate(text, voice, out_path) → str` (WAV) | `avatarpipeline/voice/kokoro.py` |
-| Use a different lip-sync | `LatentSyncInference` | `run(avatar_png, audio_wav, output_path) → str` (MP4) | `avatarpipeline/lipsync/latentsync.py` |
-| Use a different face restorer | `FaceEnhancer` | `enhance(video_path, output_path) → str` (MP4) | `avatarpipeline/postprocess/enhancer.py` |
-| Use a different ASR | `CaptionGenerator` | `transcribe(audio_wav, output_srt) → str` (SRT) | `avatarpipeline/postprocess/captions.py` |
-| Change video assembly | `VideoAssembler` | `finalize(video, output, srt) → str` (MP4) | `avatarpipeline/postprocess/assembler.py` |
+| Use a different TTS | `VoiceGenerator` | `generate(text, voice, out_path) → str` (WAV) | `src/avatarpipeline/engines/tts/kokoro.py` |
+| Use a different lip-sync | `LatentSyncInference` | `run(avatar_png, audio_wav, output_path) → str` (MP4) | `src/avatarpipeline/engines/lipsync/latentsync.py` |
+| Use a different face restorer | `FaceEnhancer` | `enhance(video_path, output_path) → str` (MP4) | `src/avatarpipeline/postprocess/enhancer.py` |
+| Use a different ASR | `CaptionGenerator` | `transcribe(audio_wav, output_srt) → str` (SRT) | `src/avatarpipeline/postprocess/captions.py` |
+| Change video assembly | `VideoAssembler` | `finalize(video, output, srt) → str` (MP4) | `src/avatarpipeline/postprocess/assembler.py` |
 
 ---
 
