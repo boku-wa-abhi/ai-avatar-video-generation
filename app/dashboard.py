@@ -263,6 +263,101 @@ def refresh_merge_list() -> dict:
     return gr.update(choices=choices, value=choices)
 
 
+# ── Presentation export helpers ───────────────────────────────────────────────
+
+def list_presentations() -> list[str]:
+    """Return presentation folder names sorted by modified time (newest first)."""
+    if not PRESENTATIONS_DIR.exists():
+        return []
+    dirs = [d for d in PRESENTATIONS_DIR.iterdir() if d.is_dir()]
+    dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+    return [d.name for d in dirs]
+
+
+def refresh_pres_list() -> dict:
+    return gr.update(choices=list_presentations())
+
+
+def _get_composite_videos(pres_name: str) -> list[Path]:
+    """Return all composite MP4s from the most-recent composite_* folder, sorted by slide number."""
+    pres_dir = PRESENTATIONS_DIR / pres_name
+    composite_dirs = sorted(pres_dir.glob("composite_*"))
+    if not composite_dirs:
+        return []
+    videos = sorted(composite_dirs[-1].glob("slide_*.mp4"))
+    return videos
+
+
+def get_pres_composite_info(pres_name: str) -> str:
+    """Return a markdown summary of composite slides found for a presentation."""
+    if not pres_name:
+        return ""
+    videos = _get_composite_videos(pres_name)
+    if not videos:
+        return f"_No composite videos found in **{pres_name}**_"
+    folder = videos[0].parent.name
+    lines = [f"**{len(videos)} slides** found in `{folder}`:"] + [
+        f"- `{v.name}`" for v in videos
+    ]
+    return "\n".join(lines)
+
+
+def export_presentation_composites(
+    pres_name: str, custom_name: str
+) -> tuple[str | None, str]:
+    """Merge all composite slides from a presentation into its exports/ folder."""
+    if not pres_name:
+        return None, "Select a presentation first."
+    pres_dir = PRESENTATIONS_DIR / pres_name
+    exports_dir = pres_dir / "exports"
+    exports_dir.mkdir(exist_ok=True)
+
+    videos = _get_composite_videos(pres_name)
+    if not videos:
+        return None, f"No composite videos found in '{pres_name}'."
+
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem = (custom_name or "").strip().removesuffix(".mp4") or pres_name
+    out_path = exports_dir / f"{stem}.mp4"
+
+    concat_txt = exports_dir / f"_concat_{run_id}.txt"
+    try:
+        with open(concat_txt, "w") as fh:
+            for p in videos:
+                fh.write(f"file '{p}'\n")
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(concat_txt),
+            "-c", "copy",
+            str(out_path),
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            return None, f"ffmpeg failed:\n{r.stderr[-400:]}"
+        size_mb = out_path.stat().st_size / 1_048_576
+        composite_folder = videos[0].parent.name
+        return str(out_path), (
+            f"Exported {len(videos)} slides → {out_path.name} ({size_mb:.1f} MB)\n"
+            f"Source: {composite_folder}\n"
+            + "\n".join(f"  {i+1}. {p.name}" for i, p in enumerate(videos))
+        )
+    except Exception as exc:
+        logger.error(f"Presentation export failed: {exc}")
+        return None, f"Error: {exc}"
+    finally:
+        concat_txt.unlink(missing_ok=True)
+
+
+def open_pres_exports_folder(pres_name: str) -> str:
+    if not pres_name:
+        return "Select a presentation first."
+    exports_dir = PRESENTATIONS_DIR / pres_name / "exports"
+    exports_dir.mkdir(exist_ok=True)
+    subprocess.Popen(["open", str(exports_dir)])
+    return f"Opened {exports_dir}"
+
+
 def merge_output_videos(selected_names: list[str], custom_name: str) -> tuple[str | None, str]:
     """Concatenate selected videos (in the order listed) into one MP4."""
     if not selected_names:
@@ -3624,6 +3719,76 @@ with gr.Blocks(title="Avatar Studio") as demo:
             outputs=[merge_output_video, merge_status],
         )
         merge_open_folder_btn.click(fn=open_output_folder, outputs=[merge_status])
+
+    # ── Export Presentation ───────────────────────────────────────────────────
+    with gr.Accordion("Export Presentation", open=False):
+        gr.HTML(
+            "<div class='section-title'>"
+            "<span class='material-symbols-outlined'>publish</span>"
+            " Merge composite slides → exports/ folder</div>"
+        )
+        gr.Markdown(
+            "Pick a presentation and click **Export**. "
+            "All slides from its latest composite folder are merged in order "
+            "and saved to `<presentation>/exports/`."
+        )
+        with gr.Row():
+            export_pres_dropdown = gr.Dropdown(
+                label="Presentation",
+                choices=list_presentations(),
+                value=None,
+                scale=3,
+            )
+            export_pres_refresh_btn = gr.Button(
+                "Refresh",
+                size="sm",
+                variant="secondary",
+                scale=1,
+            )
+        export_pres_custom_name = gr.Textbox(
+            label="Output filename (optional)",
+            placeholder="e.g. final_cut  (no .mp4 needed — defaults to presentation name)",
+        )
+        export_pres_info = gr.Markdown(value="")
+        with gr.Row():
+            export_pres_btn = gr.Button(
+                "Export Composites → exports/",
+                variant="primary",
+                elem_classes=["g-btn-primary"],
+                scale=3,
+            )
+            export_pres_open_btn = gr.Button(
+                "Open Exports Folder",
+                size="sm",
+                variant="secondary",
+                scale=1,
+            )
+        export_pres_status = gr.Textbox(
+            label="Export Status",
+            lines=6,
+            interactive=False,
+        )
+        export_pres_video = gr.Video(label="Exported Video", height=360)
+
+        export_pres_dropdown.change(
+            fn=get_pres_composite_info,
+            inputs=[export_pres_dropdown],
+            outputs=[export_pres_info],
+        )
+        export_pres_refresh_btn.click(
+            fn=refresh_pres_list,
+            outputs=[export_pres_dropdown],
+        )
+        export_pres_btn.click(
+            fn=export_presentation_composites,
+            inputs=[export_pres_dropdown, export_pres_custom_name],
+            outputs=[export_pres_video, export_pres_status],
+        )
+        export_pres_open_btn.click(
+            fn=open_pres_exports_folder,
+            inputs=[export_pres_dropdown],
+            outputs=[export_pres_status],
+        )
 
     # ── Settings ─────────────────────────────────────────────────────────────
     with gr.Accordion("Settings", open=False):
